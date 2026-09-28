@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >>"${OCR_TEST_COMMAND_LOG:?}"
+case " $* " in
+  *" get releases "*)
+    if [[ "${OCR_TEST_OC_SCENARIO:-}" == image ]]; then
+      cat <<'JSON'
+{"items":[{"metadata":{"name":"index-stage-release"},"spec":{"releasePlan":"openshift-pipelines-index-4-14-1-21-stage-fbc-rp","snapshot":"index-snapshot"},"status":{"conditions":[{"type":"Released","status":"True","reason":"Succeeded"}],"artifacts":{"indexImageResolved":"registry-proxy.engineering.redhat.com/rh-osbs/iib@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}]}
+JSON
+    else
+      printf '{"items":[]}\n'
+    fi
+    ;;
+  *) printf '{"items":[]}\n' ;;
+esac

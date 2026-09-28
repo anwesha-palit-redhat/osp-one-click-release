@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >>"${OCR_TEST_COMMAND_LOG:?}"
+
+case " $* " in
+  *" workflow run "*) exit 0 ;;
+  *" run list "*) printf '[]\n' ;;
+  *" pr list "*)
+    if [[ "${OCR_TEST_GH_SCENARIO:-}" == patch_pr ]]; then
+      printf '[{"number":42,"url":"https://github.com/openshift-pipelines/hack/pull/42","state":"OPEN","mergedAt":null}]\n'
+    else
+      printf '[]\n'
+    fi
+    ;;
+  *" search prs "*) printf '[]\n' ;;
+  *" api repos/openshift-pipelines/hack/contents/config/downstream/releases/1.21.yaml "*)
+    printf '%s' $'release-tag: 1.21.2\ncode-freeze: false\n' | base64
+    ;;
+  *) printf '[]\n' ;;
+esac
