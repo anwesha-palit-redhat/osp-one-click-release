@@ -7,6 +7,29 @@ OCR_RC_BLOCKED=10
 OCR_RC_SKIPPED=20
 OCR_KONFLUX_NS="tekton-ecosystem-tenant"
 
+ocr_load_env_file() {
+  local path=$1 line key value
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line=${line%$'\r'}
+    [[ "${line}" =~ ^[[:space:]]*(#|$) ]] && continue
+    [[ "${line}" =~ ^[[:space:]]*(export[[:space:]]+)?([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]] || continue
+    key=${BASH_REMATCH[2]}
+    value=${BASH_REMATCH[3]}
+    case "${key}" in
+      GITHUB_TOKEN | GH_TOKEN | GITHUB_USER | GITHUB_EMAIL | \
+        KONFLUX_SERVER | KONFLUX_TOKEN | GITLAB_URL | GITLAB_TOKEN | \
+        JIRA_URL | JIRA_EMAIL | JIRA_TOKEN | QUAY_USER | QUAY_PASSWORD) ;;
+      *) continue ;;
+    esac
+    value="${value%"${value##*[![:space:]]}"}"
+    if ((${#value} >= 2)) && { [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]] || [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; }; then
+      value=${value:1:${#value}-2}
+    fi
+    printf -v "${key}" '%s' "${value}"
+    export "${key?}"
+  done <"${path}"
+}
+
 ocr_cleanup_credentials() {
   [[ -n "${OCR_KUBECONFIG_FILE:-}" ]] && rm -f "${OCR_KUBECONFIG_FILE}"
   [[ -n "${OCR_CURL_CONFIG_FILE:-}" ]] && rm -f "${OCR_CURL_CONFIG_FILE}"
@@ -39,10 +62,10 @@ ocr_init_context() {
   context_repo_root=$(ocr_repo_root)
 
   if [[ -f "${context_repo_root}/.env" ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    source "${context_repo_root}/.env"
-    set +a
+    # .env is data, not shell code. Only credential and identity assignments
+    # are accepted so it cannot provide approvals, replace helpers, or alter
+    # command lookup and release targeting.
+    ocr_load_env_file "${context_repo_root}/.env"
   fi
 
   # Derived release context and the fixed namespace are authoritative. Rebuild
@@ -58,7 +81,8 @@ ocr_init_context() {
   else
     IS_PATCH=false
   fi
-  KONFLUX_NS=${OCR_KONFLUX_NS}
+  OCR_KONFLUX_NS='tekton-ecosystem-tenant'
+  KONFLUX_NS='tekton-ecosystem-tenant'
   TZ_FMT='%Y-%m-%d %H:%M %Z'
   REPO_ROOT=${context_repo_root}
 
@@ -80,21 +104,85 @@ ocr_init_context() {
 
 ocr_redact() {
   local text=${1-}
-  local secret
-  for secret in \
-    "${GITHUB_TOKEN:-}" "${GH_TOKEN:-}" "${GITLAB_TOKEN:-}" \
+  local candidate secret existing i j
+  local -a secrets=()
+  for candidate in "${GITHUB_TOKEN:-}" "${GH_TOKEN:-}" "${GITLAB_TOKEN:-}" \
     "${KONFLUX_TOKEN:-}" "${JIRA_TOKEN:-}" "${QUAY_PASSWORD:-}"; do
+    [[ -n "${candidate}" ]] || continue
+    for existing in "${secrets[@]}"; do [[ "${existing}" == "${candidate}" ]] && continue 2; done
+    secrets+=("${candidate}")
+  done
+  for ((i = 0; i < ${#secrets[@]}; i++)); do
+    for ((j = i + 1; j < ${#secrets[@]}; j++)); do
+      if ((${#secrets[j]} > ${#secrets[i]})); then
+        secret=${secrets[i]}
+        secrets[i]=${secrets[j]}
+        secrets[j]=${secret}
+      fi
+    done
+  done
+  for secret in "${secrets[@]}"; do
     if [[ -n "${secret}" ]]; then
-      text=${text//${secret}/[REDACTED]}
+      text=${text//"${secret}"/[REDACTED]}
     fi
   done
   printf '%s' "${text}"
+}
+
+ocr_workflow_succeeded() { [[ "${1:-}" == success ]]; }
+
+ocr_diff_has_only_production_images() {
+  local diff=$1
+  python3 -c '
+import re, sys
+added = [line[1:] for line in sys.stdin if line.startswith("+") and not line.startswith("+++")]
+refs=[]
+token = re.compile(r"(?:[A-Za-z0-9._-]+(?::[0-9]+)?/)+[A-Za-z0-9._:@+-]+")
+for line in added:
+    if re.search(r"(?i)(image|value|pullspec)\s*[\"'"'"']?\s*:", line) or re.search(r"(?i)(quay\.io/|registry[^\s\"'"'"']*/)", line):
+        refs.extend(token.findall(line))
+approved=re.compile(r"^registry\.redhat\.io/openshift-pipelines/[^\s@]+@sha256:[0-9a-f]{64}$")
+raise SystemExit(0 if refs and all(approved.fullmatch(ref) for ref in refs) else 1)
+' <<<"${diff}"
 }
 
 ocr_require_command() {
   command -v "$1" >/dev/null 2>&1 || {
     STEP_DETAILS="required command not found: $1"
     return "${OCR_RC_BLOCKED}"
+  }
+}
+
+ocr_remote_branch_exists() {
+  local repo=$1 branch=$2 rc
+  set +e
+  git ls-remote --exit-code "https://github.com/${repo}.git" "refs/heads/${branch}" >/dev/null 2>&1
+  rc=$?
+  set -e
+  case ${rc} in
+    0) return 0 ;;
+    2) return 1 ;;
+    *)
+      printf 'Unable to query remote branch %s:%s; refusing to guess retry state.\n' "${repo}" "${branch}" >&2
+      return 2
+      ;;
+  esac
+}
+
+ocr_remote_branch_matches() {
+  local repo=$1 base=$2 branch=$3 file_pattern=$4 allowed_patch=$5 required_patch=$6 data
+  ocr_remote_branch_exists "${repo}" "${branch}" || return $?
+  data=$(gh api "repos/${repo}/compare/${base}...${branch}" 2>/dev/null) || {
+    printf 'Unable to validate remote branch %s:%s; refusing recovery.\n' "${repo}" "${branch}" >&2
+    return 2
+  }
+  jq -e --arg pattern "${file_pattern}" --arg allowed "${allowed_patch}" --arg required "${required_patch}" '
+    [.files[] | (.patch // "") | split("\n")[] | select(test("^[+-][^+-]")) | .[1:]] as $changes
+    | .status=="ahead" and (.files|length)>0 and all(.files[]; .filename|test($pattern))
+      and ($changes|length)>0 and all($changes[]; test($allowed)) and any($changes[]; test($required))' \
+    <<<"${data}" >/dev/null || {
+    printf 'Remote branch %s:%s does not match the approved mutation scope.\n' "${repo}" "${branch}" >&2
+    return 2
   }
 }
 
@@ -249,6 +337,13 @@ ocr_workflow_log_has_environment() {
   local run_id=$1 expected=$2 log
   log=$(gh run view --repo openshift-pipelines/operator "${run_id}" --log 2>/dev/null) || return 1
   grep -Eiq "(^|[^[:alnum:]_])(environment|ENVIRONMENT)[=:][[:space:]]*${expected}([^[:alnum:]_-]|$)" <<<"${log}"
+}
+
+ocr_operator_release_stage_at() {
+  local revision=$1 content
+  content=$(gh api "repos/openshift-pipelines/operator/contents/olm/release-stage.txt?ref=${revision}" --jq '.content' 2>/dev/null) || return 2
+  content=$(base64 -d <<<"${content}" 2>/dev/null) || return 2
+  [[ "$(tr -d '[:space:]' <<<"${content}")" == production ]]
 }
 
 ocr_operator_revision_is_generated() {

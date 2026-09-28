@@ -139,8 +139,8 @@ existing_release_for_snapshot() {
   local rp=$1 snapshot=$2
   ocr_oc_get releases -o json | jq -r --arg rp "${rp}" --arg snapshot "${snapshot}" '
     [.items[] | select(.spec.releasePlan==$rp and .spec.snapshot==$snapshot)
-      | {name:.metadata.name,status:([.status.conditions[]? | select(.type=="Released")][0].status // "Unknown"),created:(.metadata.creationTimestamp // "")}
-      | sort_by(.created)][-1]
+      | {name:.metadata.name,status:([.status.conditions[]? | select(.type=="Released")][0].status // "Unknown"),created:(.metadata.creationTimestamp // "")}]
+      | sort_by(.created) | .[-1]
       | if . == null then empty else "\(.name)|\(.status)" end'
 }
 
@@ -182,35 +182,42 @@ execute_2_3() {
 }
 
 consolidate_conflicting_nudges() {
-  local prs temp branch body number diff image digest
+  local prs temp branch body number diff image digest branch_rc
   prs=$(gh pr list --repo openshift-pipelines/operator --base "${RELEASE_BRANCH}" --label konflux-nudge \
     --state open --limit 50 --json number,url,mergeable --jq '[.[] | select(.mergeable=="CONFLICTING")]')
   (($(jq length <<<"${prs}") > 0)) || return 0
-  temp=$(mktemp -d)
   branch="one-click-release/consolidated-nudge-${VERSION}"
-  git clone --depth 1 -b "${RELEASE_BRANCH}" https://github.com/openshift-pipelines/operator.git "${temp}/operator"
-  (
-    cd "${temp}/operator"
-    while IFS= read -r number; do
-      diff=$(gh pr diff --repo openshift-pipelines/operator "${number}")
-      while IFS= read -r line; do
-        image=$(sed -E 's#^\+.*[[:space:]]([^[:space:]]+)@sha256:[a-f0-9]{64}.*#\1#' <<<"${line}")
-        digest=$(grep -oE '@sha256:[a-f0-9]{64}' <<<"${line}" | head -1 | cut -d: -f2)
-        [[ -n "${image}" && -n "${digest}" ]] || continue
-        sed -i -E "s#(${image}@sha256:)[a-f0-9]{64}#\\1${digest}#g" project.yaml
-      done < <(grep -E '^\+.*@sha256:[a-f0-9]{64}' <<<"${diff}")
-    done < <(jq -r '.[].number' <<<"${prs}")
-    git diff --quiet project.yaml && {
-      printf 'No digest changes extracted from conflicting PRs.\n' >&2
-      exit 2
-    }
-    git config user.name "${GITHUB_USER:-One Click Release Bot}"
-    git config user.email "${GITHUB_EMAIL:-one-click-release-bot@redhat.com}"
-    git checkout -b "${branch}"
-    git add project.yaml
-    git commit -m "chore(deps): consolidated nudge updates for ${VERSION}"
-    git push origin "${branch}"
-  )
+  if ocr_remote_branch_matches openshift-pipelines/operator "${RELEASE_BRANCH}" "${branch}" '^project\.yaml$' 'sha256:[0-9a-f]{64}' 'sha256:[0-9a-f]{64}'; then
+    : # Resume below by creating the missing PR from the existing branch.
+  else
+    branch_rc=$?
+    ((branch_rc == 1)) || return 2
+    temp=$(mktemp -d)
+    git clone --depth 1 -b "${RELEASE_BRANCH}" https://github.com/openshift-pipelines/operator.git "${temp}/operator"
+    (
+      cd "${temp}/operator"
+      while IFS= read -r number; do
+        diff=$(gh pr diff --repo openshift-pipelines/operator "${number}")
+        while IFS= read -r line; do
+          image=$(sed -E 's#^\+.*[[:space:]]([^[:space:]]+)@sha256:[a-f0-9]{64}.*#\1#' <<<"${line}")
+          digest=$(grep -oE '@sha256:[a-f0-9]{64}' <<<"${line}" | head -1 | cut -d: -f2)
+          [[ -n "${image}" && -n "${digest}" ]] || continue
+          sed -i -E "s#(${image}@sha256:)[a-f0-9]{64}#\\1${digest}#g" project.yaml
+        done < <(grep -E '^\+.*@sha256:[a-f0-9]{64}' <<<"${diff}")
+      done < <(jq -r '.[].number' <<<"${prs}")
+      git diff --quiet project.yaml && {
+        printf 'No digest changes extracted from conflicting PRs.\n' >&2
+        exit 2
+      }
+      git config user.name "${GITHUB_USER:-One Click Release Bot}"
+      git config user.email "${GITHUB_EMAIL:-one-click-release-bot@redhat.com}"
+      git checkout -b "${branch}"
+      git add project.yaml
+      git commit -m "chore(deps): consolidated nudge updates for ${VERSION}"
+      git push origin "${branch}"
+    )
+    rm -rf "${temp}"
+  fi
   body=$(jq -r 'map("- #\(.number)") | join("\n")' <<<"${prs}")
   gh pr create --repo openshift-pipelines/operator --base "${RELEASE_BRANCH}" --head "${branch}" \
     --title "chore(deps): consolidated nudge updates for ${VERSION}" \
@@ -220,7 +227,6 @@ consolidate_conflicting_nudges() {
     gh pr close --repo openshift-pipelines/operator "${number}" \
       --comment 'Superseded by the consolidated nudge PR; its SHA update is included there.'
   done < <(jq -r '.[].number' <<<"${prs}")
-  rm -rf "${temp}"
 }
 
 execute_2_4() {
@@ -257,11 +263,15 @@ latest_run_id() {
 }
 
 wait_in_progress_runs() {
-  local workflow=$1 id
+  local workflow=$1 id runs
+  runs=$(gh run list --repo openshift-pipelines/operator --workflow="${workflow}" --limit 5 \
+    --json databaseId,status) || {
+    printf 'Unable to query in-progress %s runs; refusing to dispatch a duplicate.\n' "${workflow}" >&2
+    return 2
+  }
   while IFS= read -r id; do
     [[ -n "${id}" ]] && gh run watch --repo openshift-pipelines/operator "${id}"
-  done < <(gh run list --repo openshift-pipelines/operator --workflow="${workflow}" --limit 5 \
-    --json databaseId,status --jq '.[] | select(.status=="in_progress" or .status=="queued") | .databaseId')
+  done < <(jq -r '.[] | select(.status=="in_progress" or .status=="queued") | .databaseId' <<<"${runs}")
 }
 
 execute_2_5() {
@@ -409,7 +419,7 @@ execute_2_8() {
 }
 
 execute_2_9() {
-  local temp branch pr open_url
+  local temp branch pr open_url branch_rc
   temp=$(mktemp -d)
   branch="release/${VERSION}/code-freeze"
   open_url=$(gh pr list --repo openshift-pipelines/hack --head "${branch}" --state open --limit 1 --json url --jq '.[0].url // empty')
@@ -422,6 +432,21 @@ execute_2_9() {
     printf 'Existing code-freeze PR is not ready: %s\n' "${open_url}" >&2
     rm -rf "${temp}"
     return 2
+  fi
+  if ocr_remote_branch_matches openshift-pipelines/hack main "${branch}" "^config/downstream/releases/${MAJOR_MINOR//./\\.}\\.yaml$" '^\s*code-freeze:\s*(false|true)$' '^\s*code-freeze:\s*true$'; then
+    gh pr create --repo openshift-pipelines/hack --base main --head "${branch}" \
+      --title "[bot:${MAJOR_MINOR}] Set code freeze for ${VERSION}" \
+      --body 'Resumes the previously pushed code-freeze branch.' --label automated
+    pr=$(gh pr list --repo openshift-pipelines/hack --head "${branch}" --state open --limit 1 --json number --jq '.[0].number')
+    gh pr merge --repo openshift-pipelines/hack "${pr}" --rebase
+    rm -rf "${temp}"
+    return
+  else
+    branch_rc=$?
+    ((branch_rc == 1)) || {
+      rm -rf "${temp}"
+      return 2
+    }
   fi
   git clone --depth 1 https://github.com/openshift-pipelines/hack.git "${temp}/hack"
   (
@@ -453,4 +478,6 @@ ocr_execute_step() {
   esac
 }
 
-ocr_execute_stage "${1:-}" "${2:-}"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  ocr_execute_stage "${1:-}" "${2:-}"
+fi

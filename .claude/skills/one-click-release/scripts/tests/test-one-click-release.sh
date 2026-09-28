@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC1091
+# shellcheck disable=SC1091,SC2016,SC2317
 set -euo pipefail
 
 TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -92,16 +92,29 @@ else
   pass 'verify scripts contain no mutating commands'
 fi
 
-printf '%s\n' "OCR_ACTION_APPROVAL='execute 1.21.3 config 1.1'" "OCR_PRODUCTION_APPROVAL='start production-release 1.21.3'" "VERSION='9.9.9'" "KONFLUX_NS='wrong-namespace'" >"${OCR_REPO_ROOT}/.env"
+printf '%s\n' \
+  "OCR_ACTION_APPROVAL='execute 1.21.3 config 1.1'" \
+  "OCR_PRODUCTION_APPROVAL='start production-release 1.21.3'" \
+  "VERSION='9.9.9'" \
+  "KONFLUX_NS='wrong-namespace'" \
+  "OCR_KONFLUX_NS='attacker-namespace'" \
+  "OCR_RC_BLOCKED='0'" \
+  "OCR_RC_SKIPPED='0'" \
+  'ocr_confirm_action() { return 0; }' \
+  "GITHUB_TOKEN='\$(touch ${tmp}/env-command-ran)'" \
+  >"${OCR_REPO_ROOT}/.env"
 ocr_init_context 1.21.3
 assert_eq '1.21.3|tekton-ecosystem-tenant' "${VERSION}|${KONFLUX_NS}" '.env cannot retarget the release version or fixed namespace'
+assert_eq '10|20' "${OCR_RC_BLOCKED}|${OCR_RC_SKIPPED}" '.env cannot turn blocked or skipped gates into success'
+if [[ -e "${tmp}/env-command-ran" ]]; then fail '.env is parsed as data without command execution'; else pass '.env is parsed as data without command execution'; fi
 : >"${OCR_TEST_COMMAND_LOG}"
 assert_eq '3' "$(run_rc "${SCRIPTS_DIR}/one-click-release.sh" execute 1.21.3 --stage config --step 1.1)" 'execute rejects missing exact action approval'
 if grep -q 'workflow run\|pr merge\|git push\|oc create\|skopeo copy' "${OCR_TEST_COMMAND_LOG}"; then
-  fail 'rejected execute runs no mutation'
+  fail '.env helper injection cannot bypass invocation-scoped approval'
 else
-  pass 'rejected execute runs no mutation'
+  pass '.env helper injection cannot bypass invocation-scoped approval'
 fi
+if grep -q 'source.*\.env' "${SCRIPTS_DIR}/image-copy/execute.sh"; then fail 'deferred copy script does not execute .env as shell code'; else pass 'deferred copy script does not execute .env as shell code'; fi
 
 : >"${OCR_TEST_COMMAND_LOG}"
 assert_eq '2' "$(run_rc_input 'execute 1.21.3 config 1.1' "${SCRIPTS_DIR}/one-click-release.sh" execute 1.21.3 --stage config --step 1.1)" 'current-invocation approval mutates then returns the re-verification blocker'
@@ -124,6 +137,64 @@ if grep -q -- '--token\|placeholder-token-value' "${OCR_TEST_COMMAND_LOG}"; then
 unset OCR_TEST_OC_SCENARIO
 
 assert_eq '[REDACTED] and [REDACTED]' "$(GITHUB_TOKEN=github-secret KONFLUX_TOKEN=cluster-secret ocr_redact 'github-secret and cluster-secret')" 'secret redaction removes credential values'
+assert_eq 'prefix [REDACTED] [REDACTED] suffix' "$(GITHUB_TOKEN='a[b]c' KONFLUX_TOKEN='a\b' ocr_redact 'prefix a[b]c a\b suffix')" 'secret redaction treats glob and escape characters literally'
+assert_eq 'token=[REDACTED]' "$(GITHUB_TOKEN=abc GH_TOKEN=abc123 ocr_redact 'token=abc123')" 'secret redaction handles overlapping values longest-first'
+
+for conclusion in timed_out action_required startup_failure stale skipped cancelled failure ''; do
+  if ocr_workflow_succeeded "${conclusion}"; then fail "production rejects non-success workflow conclusion ${conclusion:-missing}"; else pass "production rejects non-success workflow conclusion ${conclusion:-missing}"; fi
+done
+if ocr_workflow_succeeded success; then pass 'production accepts only a successful workflow conclusion'; else fail 'production accepts only a successful workflow conclusion'; fi
+
+production_diff=$'+olm/release-stage.txt\n+production\n+  image: registry.redhat.io/openshift-pipelines/pipelines-controller@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+mixed_diff="${production_diff}"$'\n+  image: quay.io/openshift-pipeline/pipelines-webhook@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+unknown_diff="${production_diff}"$'\n+  image: images.example.com/team/unknown@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+tagged_diff="${production_diff}"$'\n+  image: quay.io/attacker/evil:latest'
+prod_tag_diff=$'+ image: registry.redhat.io/openshift-pipelines/controller:latest'
+pullspec_diff="${production_diff}"$'\n+ pullspec: images.example.com/team/evil:latest'
+if ocr_diff_has_only_production_images "${production_diff}"; then pass 'production diff requires exact production-registry evidence'; else fail 'production diff requires exact production-registry evidence'; fi
+if ocr_diff_has_only_production_images "${mixed_diff}"; then fail 'production diff rejects mixed-registry evidence'; else pass 'production diff rejects mixed-registry evidence'; fi
+if ocr_diff_has_only_production_images "${unknown_diff}"; then fail 'production diff rejects unknown registry evidence'; else pass 'production diff rejects unknown registry evidence'; fi
+if ocr_diff_has_only_production_images "${tagged_diff}"; then fail 'production diff rejects mutable non-production tags'; else pass 'production diff rejects mutable non-production tags'; fi
+if ocr_diff_has_only_production_images "${prod_tag_diff}"; then fail 'production diff requires immutable production digests'; else pass 'production diff requires immutable production digests'; fi
+if ocr_diff_has_only_production_images "${pullspec_diff}"; then fail 'production diff rejects alternate non-production pullspec keys'; else pass 'production diff rejects alternate non-production pullspec keys'; fi
+if ocr_diff_has_only_production_images '+production'; then fail 'production diff rejects missing image evidence'; else pass 'production diff rejects missing image evidence'; fi
+
+release_retry_history='{"items":[{"metadata":{"name":"old-failed","creationTimestamp":"2026-09-28T10:00:00Z"},"spec":{"releasePlan":"rp","snapshot":"snap"},"status":{"conditions":[{"type":"Released","status":"False"}]}},{"metadata":{"name":"new-success","creationTimestamp":"2026-09-28T11:00:00Z"},"spec":{"releasePlan":"rp","snapshot":"snap"},"status":{"conditions":[{"type":"Released","status":"True"}]}}]}'
+retry_lookup=$(
+  source "${SCRIPTS_DIR}/production-release/execute.sh"
+  ocr_oc_get() { printf '%s\n' "${release_retry_history}"; }
+  existing_release_for_snapshot rp snap
+)
+assert_eq 'new-success|True' "${retry_lookup}" 'Release retry lookup selects the newest existing attempt without jq failure'
+
+if (
+  git() { return 0; }
+  ocr_remote_branch_exists owner/repo release/branch
+); then pass 'partial retry detects an already-pushed remote branch'; else fail 'partial retry detects an already-pushed remote branch'; fi
+if (
+  git() { return 0; }
+  gh() { printf '%s\n' '{"status":"ahead","files":[{"filename":"project.yaml","patch":"-current: 1.2.2\n+current: 1.2.3"}]}'; }
+  ocr_remote_branch_matches owner/repo base branch '^project\.yaml$' '^current:' '^current: 1\.2\.3$'
+); then pass 'partial retry validates the existing branch mutation scope'; else fail 'partial retry validates the existing branch mutation scope'; fi
+assert_eq '2' "$(run_rc bash -c 'source "$1"; git() { return 0; }; gh() { printf "%s\n" '\''{"status":"ahead","files":[{"filename":"unexpected.sh","patch":"+bad"}]}'\''; }; ocr_remote_branch_matches owner/repo base branch "^project\\.yaml$" "^current:" "^current: 1\\.2\\.3$"' _ "${SCRIPTS_DIR}/lib/common.sh")" 'partial retry rejects an unexpected existing branch diff'
+assert_eq '2' "$(run_rc bash -c 'source "$1"; git() { return 0; }; gh() { printf "%s\n" '\''{"status":"ahead","files":[{"filename":"project.yaml","patch":"+malicious: true"}]}'\''; }; ocr_remote_branch_matches owner/repo base branch "^project\\.yaml$" "^current:" "^current: 1\\.2\\.3$"' _ "${SCRIPTS_DIR}/lib/common.sh")" 'partial retry rejects an unexpected semantic change in an allowed file'
+assert_eq '1' "$(run_rc bash -c 'source "$1"; git() { return 2; }; ocr_remote_branch_exists owner/repo release/branch' _ "${SCRIPTS_DIR}/lib/common.sh")" 'partial retry distinguishes an absent remote branch'
+assert_eq '2' "$(run_rc bash -c 'source "$1"; git() { return 128; }; ocr_remote_branch_exists owner/repo release/branch' _ "${SCRIPTS_DIR}/lib/common.sh")" 'partial retry fails closed when remote branch lookup fails'
+recovery_count=$(grep -Rhc 'ocr_remote_branch_matches' "${SCRIPTS_DIR}/config/execute.sh" "${SCRIPTS_DIR}/build/execute.sh" | awk '{n+=$1} END {print n}')
+if ((recovery_count >= 5)); then pass 'all fixed-branch PR mutations include partial-push recovery'; else fail 'all fixed-branch PR mutations include partial-push recovery'; fi
+
+assert_eq '0' "$(run_rc bash -c 'source "$1"; gh() { printf "%s\n" cHJvZHVjdGlvbgo=; }; ocr_operator_release_stage_at abc' _ "${SCRIPTS_DIR}/lib/common.sh")" 'snapshot evidence identifies a proven production catalog'
+assert_eq '1' "$(run_rc bash -c 'source "$1"; gh() { printf "%s\n" ZGV2ZWwK; }; ocr_operator_release_stage_at abc' _ "${SCRIPTS_DIR}/lib/common.sh")" 'snapshot evidence distinguishes a proven non-production catalog'
+assert_eq '2' "$(run_rc bash -c 'source "$1"; gh() { return 1; }; ocr_operator_release_stage_at abc' _ "${SCRIPTS_DIR}/lib/common.sh")" 'snapshot evidence distinguishes an API failure from non-production state'
+if grep -q 'retaining the pre-dispatch baseline' "${SCRIPTS_DIR}/production-release/execute.sh" && grep -q 'single pending file' "${SCRIPTS_DIR}/../SETUP.md"; then pass 'ambiguous dispatch recovery retains and documents its invocation state'; else fail 'ambiguous dispatch recovery retains and documents its invocation state'; fi
+if grep -q 'commit.committer.date' "${SCRIPTS_DIR}/production-release/execute.sh" && grep -q 'recorded_commit_at' "${SCRIPTS_DIR}/production-release/verify.sh"; then pass 'catalog PR head commit is correlated to the production workflow run'; else fail 'catalog PR head commit is correlated to the production workflow run'; fi
+
+export OCR_TEST_GH_SCENARIO=run_list_fail
+if (
+  source "${SCRIPTS_DIR}/build/execute.sh"
+  wait_in_progress_runs render-olm-catalog.yaml
+); then fail 'workflow-list API failure blocks duplicate dispatch'; else pass 'workflow-list API failure blocks duplicate dispatch'; fi
+unset OCR_TEST_GH_SCENARIO
 
 ocr_record_workflow_run production-proof render-olm-catalog.yaml production "${RELEASE_BRANCH}" 12345 2026-09-28T12:00:00Z
 ocr_load_workflow_run production-proof

@@ -72,10 +72,14 @@ verify_release() {
       | select($exclude=="" or (.spec.releasePlan | contains($exclude) | not))
       | select($snapshot=="" or .spec.snapshot==$snapshot)
       | select(any(.status.conditions[]?; .type=="Released" and .status=="True"))] | length' <<<"${data}")
-  name=$(jq -r --arg mm "${MM_DASHED}" --arg kind "${kind}" --arg exclude "${exclude}" --arg snapshot "${expected_snapshot}" '
+  name=$(jq -er --arg mm "${MM_DASHED}" --arg kind "${kind}" --arg exclude "${exclude}" --arg snapshot "${expected_snapshot}" '
     [.items[] | select(.spec.releasePlan | contains($mm) and contains($kind) and contains("prod"))
       | select($exclude=="" or (.spec.releasePlan | contains($exclude) | not))
-      | select($snapshot=="" or .spec.snapshot==$snapshot) | sort_by(.metadata.creationTimestamp // "")][-1].metadata.name // empty' <<<"${data}")
+      | select($snapshot=="" or .spec.snapshot==$snapshot)]
+      | sort_by(.metadata.creationTimestamp // "") | .[-1].metadata.name // ""' <<<"${data}") || {
+    STEP_DETAILS="unable to select exact ${kind} production release evidence"
+    return "${OCR_RC_BLOCKED}"
+  }
   STEP_DETAILS="${kind} production release: ${name:-not found}; expected snapshot=${expected_snapshot:-any}; succeeded=${count}"
   ((count > 0)) || return "${OCR_RC_BLOCKED}"
 }
@@ -163,8 +167,8 @@ verify_4_4() {
     ocr_fail_with_error 'unable to inspect production CSV PR diff' "${error}"
     return $?
   }
-  if grep -Ei '^\+.*image:.*(stage|staging|devel)' <<<"${diff}" >/dev/null; then
-    STEP_DETAILS="merged CSV PR #${number} contains non-production registry references"
+  if ! ocr_diff_has_only_production_images "${diff}"; then
+    STEP_DETAILS="merged CSV PR #${number} lacks exact production-registry evidence or contains another registry"
     return "${OCR_RC_BLOCKED}"
   fi
   STEP_DETAILS="production CSV PR #${number} merged; no staging image additions"
@@ -214,7 +218,8 @@ verify_4_6() {
 
 verify_4_7() {
   ocr_require_konflux || return $?
-  local run run_url apps app snapshot rev head created checked=0 stale=0 old=0 error releases bundle_release_created
+  local run run_url apps app snapshot rev created checked=0 stale=0 old=0 error releases bundle_release_created
+  local state_file number recorded_head recorded_commit_at pr pr_url pr_state head_oid merged_at merge_sha diff ancestry release_stage commit
   ocr_workflow_provenance_matches production-render render-olm-catalog.yaml production "${RELEASE_BRANCH}" || {
     STEP_DETAILS='no locally recorded production render dispatch; staging or unrelated runs are never accepted'
     return "${OCR_RC_BLOCKED}"
@@ -241,8 +246,50 @@ verify_4_7() {
     STEP_DETAILS='production render does not follow the successful bundle production release'
     return "${OCR_RC_BLOCKED}"
   }
+  state_file="${REPORT_BASE}/.state/production-catalog-pr"
+  [[ -s "${state_file}" ]] || {
+    STEP_DETAILS='exact production catalog PR provenance is missing'
+    return "${OCR_RC_BLOCKED}"
+  }
+  IFS='|' read -r number recorded_head recorded_commit_at <"${state_file}"
+  [[ "${number}" =~ ^[0-9]+$ && "${recorded_head}" =~ ^[0-9a-f]{40}$ && ("${recorded_commit_at}" == "${created}" || "${recorded_commit_at}" > "${created}") ]] || {
+    STEP_DETAILS='recorded production catalog PR provenance is malformed'
+    return "${OCR_RC_BLOCKED}"
+  }
+  pr=$(gh pr view --repo openshift-pipelines/operator "${number}" \
+    --json state,url,headRefOid,mergedAt,mergeCommit 2>"${REPORT_BASE}/.state/gh-error") || {
+    error=$(<"${REPORT_BASE}/.state/gh-error")
+    ocr_fail_with_error 'unable to verify production catalog PR' "${error}"
+    return $?
+  }
+  pr_state=$(jq -r '.state // empty' <<<"${pr}")
+  pr_url=$(jq -r '.url // empty' <<<"${pr}")
+  head_oid=$(jq -r '.headRefOid // empty' <<<"${pr}")
+  merged_at=$(jq -r '.mergedAt // empty' <<<"${pr}")
+  merge_sha=$(jq -r '.mergeCommit.oid // empty' <<<"${pr}")
+  commit=$(gh api "repos/openshift-pipelines/operator/commits/${recorded_head}" 2>"${REPORT_BASE}/.state/gh-error") || {
+    error=$(<"${REPORT_BASE}/.state/gh-error")
+    ocr_fail_with_error 'unable to verify production catalog head commit' "${error}"
+    return $?
+  }
+  jq -e --arg date "${recorded_commit_at}" '(.author.login=="openshift-pipelines-bot" or .author.login=="github-actions[bot]" or .author.login=="red-hat-konflux[bot]") and .commit.committer.date==$date' <<<"${commit}" >/dev/null || {
+    STEP_DETAILS="recorded production catalog head ${recorded_head} lacks matching post-run bot provenance"
+    return "${OCR_RC_BLOCKED}"
+  }
+  [[ "${pr_state}" == MERGED && "${head_oid}" == "${recorded_head}" && "${merged_at}" > "${created}" && "${merge_sha}" =~ ^[0-9a-f]{40}$ ]] || {
+    STEP_DETAILS="production catalog PR #${number} is not a provenance-matching merge after run ${RUN_ID}"
+    return "${OCR_RC_BLOCKED}"
+  }
+  diff=$(gh pr diff --repo openshift-pipelines/operator "${number}" 2>"${REPORT_BASE}/.state/gh-error") || {
+    error=$(<"${REPORT_BASE}/.state/gh-error")
+    ocr_fail_with_error 'unable to inspect production catalog PR diff' "${error}"
+    return $?
+  }
+  ocr_diff_has_only_production_images "${diff}" || {
+    STEP_DETAILS="production catalog PR #${number} lacks exact production-registry evidence or contains another registry"
+    return "${OCR_RC_BLOCKED}"
+  }
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
-  head=$(git ls-remote https://github.com/openshift-pipelines/operator.git "refs/heads/${RELEASE_BRANCH}" | awk '{print $1}')
   : >"${REPORT_BASE}/.state/production-index-snapshots.tsv"
   while IFS= read -r app; do
     snapshot=$(ocr_latest_snapshot "${app}")
@@ -251,12 +298,14 @@ verify_4_7() {
     rev=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.spec.components[0].source.git.revision}')
     local snapshot_created
     snapshot_created=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.metadata.creationTimestamp}')
-    [[ "${snapshot_created}" > "${created}" ]] || ((old += 1))
-    [[ "${rev}" == "${head}" ]] || ((stale += 1))
-    printf '%s\t%s\t%s\t%s\t%s\n' "${app}" "${snapshot}" "${rev}" "${snapshot_created}" "$([[ "${rev}" == "${head}" && "${snapshot_created}" > "${created}" ]] && echo CURRENT || echo STALE)" >>"${REPORT_BASE}/.state/production-index-snapshots.tsv"
+    ancestry=$(gh api "repos/openshift-pipelines/operator/compare/${merge_sha}...${rev}" --jq '.status' 2>/dev/null) || ancestry=unknown
+    if ocr_operator_release_stage_at "${rev}"; then release_stage=production; else release_stage=unknown; fi
+    [[ "${snapshot_created}" > "${merged_at}" ]] || ((old += 1))
+    [[ ("${ancestry}" == ahead || "${ancestry}" == identical) && "${release_stage}" == production ]] || ((stale += 1))
+    printf '%s\t%s\t%s\t%s\t%s\n' "${app}" "${snapshot}" "${rev}" "${snapshot_created}" "$([[ ("${ancestry}" == ahead || "${ancestry}" == identical) && "${release_stage}" == production && "${snapshot_created}" > "${merged_at}" ]] && echo CURRENT || echo STALE)" >>"${REPORT_BASE}/.state/production-index-snapshots.tsv"
   done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
   STEP_DETAILS="production render run ${RUN_ID} succeeded; ${checked} index snapshots checked; ${stale} stale; ${old} pre-render"
-  STEP_LINKS="[render-olm-catalog](${run_url})"
+  STEP_LINKS="[render-olm-catalog](${run_url}), operator [#${number}](${pr_url})"
   ((checked > 0 && stale == 0 && old == 0)) || return "${OCR_RC_BLOCKED}"
 }
 

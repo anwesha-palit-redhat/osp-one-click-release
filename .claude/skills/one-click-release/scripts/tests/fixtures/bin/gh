@@ -7,6 +7,10 @@ if [[ "${OCR_TEST_GH_SCENARIO:-}" == api_fail && " $* " == *" search prs "* ]]; 
   printf 'simulated authentication failure: token fixture-secret rejected\n' >&2
   exit 1
 fi
+if [[ "${OCR_TEST_GH_SCENARIO:-}" == run_list_fail && " $* " == *" run list "* ]]; then
+  printf 'simulated run-list API failure\n' >&2
+  exit 1
+fi
 
 case " $* " in
   *" run view "*" 12345 --log "*) printf '%s\n' 'make ENVIRONMENT=production update-reference' ;;

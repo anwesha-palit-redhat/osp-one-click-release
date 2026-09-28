@@ -80,7 +80,7 @@ execute_1_5() { manual_action 'MANUAL: copy RPAs from hack .konflux/ into konflu
 execute_1_6() { manual_action 'MANUAL: add Pyxis configuration via a GitLab MR when new component images are introduced.'; }
 
 execute_1_7() {
-  local project current previous temp branch open_url
+  local project current previous temp branch open_url branch_rc
   branch="release/${VERSION}/project-yaml-version-bump"
   open_url=$(gh pr list --repo openshift-pipelines/operator --head "${branch}" --state open --limit 1 --json url --jq '.[0].url // empty')
   if [[ -n "${open_url}" ]]; then
@@ -90,6 +90,15 @@ execute_1_7() {
     fi
     printf 'Existing project.yaml version PR is not ready: %s\n' "${open_url}" >&2
     return 2
+  fi
+  if ocr_remote_branch_matches openshift-pipelines/operator "${RELEASE_BRANCH}" "${branch}" '^project\.yaml$' '^\s*(current|previous):' "^\\s*current: ${VERSION}$"; then
+    gh pr create --repo openshift-pipelines/operator --base "${RELEASE_BRANCH}" --head "${branch}" \
+      --title "[bot:${MAJOR_MINOR}] Update project.yaml version to ${VERSION}" \
+      --body "Resumes the previously pushed project.yaml version bump for ${VERSION}." --label automated
+    return
+  else
+    branch_rc=$?
+    ((branch_rc == 1)) || return 2
   fi
   project=$(gh_content "repos/openshift-pipelines/operator/contents/project.yaml?ref=${RELEASE_BRANCH}")
   current=$(awk '/current:/ {print $2; exit}' <<<"${project}")
@@ -127,7 +136,7 @@ pr_checks_ready() {
 }
 
 execute_1_8() {
-  local prs count url state versions current temp branch mismatches non_opc
+  local prs count url state versions current temp branch mismatches non_opc branch_rc
   prs=$(gh pr list --repo openshift-pipelines/opc --base "${RELEASE_BRANCH}" --state open \
     --search 'Update component versions in:title' --json url,mergeStateStatus)
   local opc_bump
@@ -168,8 +177,17 @@ execute_1_8() {
     printf 'GITHUB_USER and GITHUB_EMAIL are required for the OPC commit.\n' >&2
     return 2
   }
-  temp=$(mktemp -d)
   branch="release/${VERSION}/opc-version-bump"
+  if ocr_remote_branch_matches openshift-pipelines/opc "${RELEASE_BRANCH}" "${branch}" '^pkg/version\.json$' '^\s*"opc"\s*:' "^\\s*\"opc\"\\s*:\\s*\"?v?${VERSION}\"?,?$"; then
+    gh pr create --repo openshift-pipelines/opc --base "${RELEASE_BRANCH}" --head "${branch}" \
+      --title "[bot:${MAJOR_MINOR}] Update OPC version to ${VERSION}" \
+      --body "Resumes the previously pushed pkg/version.json OPC version bump for ${VERSION}." --label automated
+    return
+  else
+    branch_rc=$?
+    ((branch_rc == 1)) || return 2
+  fi
+  temp=$(mktemp -d)
   trap 'rm -rf "${temp}"' RETURN
   gh repo clone openshift-pipelines/opc "${temp}/opc" -- -b "${RELEASE_BRANCH}" --depth 1 --quiet
   (
@@ -194,7 +212,7 @@ execute_1_8() {
 execute_1_9() { manual_action "MANUAL: synchronize p12n-opc upstream/ with OPC ${RELEASE_BRANCH} and create a PR."; }
 
 execute_1_10() {
-  local open url temp branch cfg cli_upstream
+  local open url temp branch cfg cli_upstream branch_rc
   open=$(gh pr list --repo openshift-pipelines/serve-tkn-cli --head "release/${VERSION}/update-submodules" \
     --state open --limit 1 --json url)
   url=$(jq -r '.[0].url // empty' <<<"${open}")
@@ -214,6 +232,19 @@ execute_1_10() {
   }
   temp=$(mktemp -d)
   branch="release/${VERSION}/update-submodules"
+  if ocr_remote_branch_matches openshift-pipelines/serve-tkn-cli "${RELEASE_BRANCH}" "${branch}" '^(\.gitmodules|sources/[^/]+)$' '^(\s*branch\s*=|Subproject commit )' '^(\s*branch\s*=|Subproject commit )'; then
+    gh pr create --repo openshift-pipelines/serve-tkn-cli --base "${RELEASE_BRANCH}" --head "${branch}" \
+      --title "[bot:${MAJOR_MINOR}] Update submodules to latest upstream" \
+      --body 'Resumes the previously pushed submodule update branch.' --label automated
+    rm -rf "${temp}"
+    return
+  else
+    branch_rc=$?
+    ((branch_rc == 1)) || {
+      rm -rf "${temp}"
+      return 2
+    }
+  fi
   trap 'rm -rf "${temp}"' RETURN
   git clone -b "${RELEASE_BRANCH}" https://github.com/openshift-pipelines/serve-tkn-cli.git "${temp}/serve-tkn-cli"
   (

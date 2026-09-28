@@ -20,7 +20,7 @@ ocr_describe_action() {
     4.4) printf 'Validate and merge the production CSV PR.\n' ;;
     4.5) printf 'Trigger a production bundle rebuild.\n' ;;
     4.6) printf 'Create the bundle production Release CR.\n' ;;
-    4.7) printf 'Wait for devel renders, dispatch the production catalog render, and wait for it.\n' ;;
+    4.7) printf 'Wait for devel renders, dispatch the production catalog render, validate and merge its exact generated PR, then verify or trigger production index snapshots.\n' ;;
     4.8) printf 'Create all index production Release CRs.\n' ;;
     4.9) printf 'Create the CDN production Release CR using the succeeded core production snapshot.\n' ;;
   esac
@@ -50,8 +50,8 @@ existing_release_for_snapshot() {
   local rp=$1 snapshot=$2
   ocr_oc_get releases -o json | jq -r --arg rp "${rp}" --arg snapshot "${snapshot}" '
     [.items[] | select(.spec.releasePlan==$rp and .spec.snapshot==$snapshot)
-      | {name:.metadata.name,status:([.status.conditions[]? | select(.type=="Released")][0].status // "Unknown"),created:(.metadata.creationTimestamp // "")}
-      | sort_by(.created)][-1]
+      | {name:.metadata.name,status:([.status.conditions[]? | select(.type=="Released")][0].status // "Unknown"),created:(.metadata.creationTimestamp // "")}]
+      | sort_by(.created) | .[-1]
       | if . == null then empty else "\(.name)|\(.status)" end'
 }
 
@@ -143,7 +143,7 @@ dispatch_or_resume() {
       printf 'DISPATCHED_AT=%q\n' "${dispatched}"
     } >"${pending}"
     if ! gh workflow run "${workflow}" --repo openshift-pipelines/operator "$@"; then
-      rm -f "${pending}"
+      printf 'Workflow dispatch returned an error; retaining the pre-dispatch baseline so retry can recover without redispatching.\n' >&2
       return 2
     fi
   fi
@@ -165,7 +165,7 @@ dispatch_or_resume() {
     sleep 1
   done
   ((count == 1)) || {
-    printf 'Dispatched %s but its run ID is not visible yet; retry will recover without redispatching.\n' "${workflow}" >&2
+    printf 'No unambiguous %s run is visible after the retained dispatch baseline; retry will not redispatch. If GitHub confirms the request was rejected and no post-baseline run exists, remove %s only after explicit approval.\n' "${workflow}" "${pending}" >&2
     return 2
   }
   id=$(jq -r '.[0].databaseId' <<<"${run}")
@@ -187,8 +187,9 @@ execute_4_3() {
     run=$(gh run view --repo openshift-pipelines/operator "${RUN_ID}" --json status,conclusion) || return 2
     conclusion=$(jq -r '.conclusion // ""' <<<"${run}")
   fi
-  [[ "${conclusion}" != failure && "${conclusion}" != cancelled ]] || {
+  ocr_workflow_succeeded "${conclusion}" || {
     rm -f "$(ocr_workflow_state_file production-csv)"
+    printf 'Production CSV workflow did not succeed (conclusion=%s); provenance cleared for an explicit retry.\n' "${conclusion:-missing}" >&2
     return 2
   }
 }
@@ -216,8 +217,8 @@ execute_4_4() {
     return 2
   }
   diff=$(gh pr diff "${url}")
-  if grep -Ei '^\+.*image:.*(stage|staging|devel)' <<<"${diff}" >/dev/null; then
-    printf 'Production CSV PR contains non-production references; refusing to merge.\n' >&2
+  if ! ocr_diff_has_only_production_images "${diff}"; then
+    printf 'Production CSV PR lacks exact registry.redhat.io/openshift-pipelines image evidence or contains another registry; refusing to merge.\n' >&2
     return 2
   fi
   pr_ready "${url}" || {
@@ -251,7 +252,12 @@ wait_in_progress() {
 
 execute_4_7() {
   ocr_require_konflux || return 2
-  local apps head app snapshot rev snapshot_created stale=false found=0 run status conclusion
+  local apps app snapshot rev snapshot_created stale=false found=0 run status conclusion
+  local state_file number recorded_head recorded_commit_at pr url diff pr_state head_oid merged_at merge_sha ancestry release_stage stage_rc commit
+  state_file="${REPORT_BASE}/.state/production-catalog-pr"
+  if ! ocr_workflow_provenance_matches production-render render-olm-catalog.yaml production "${RELEASE_BRANCH}"; then
+    rm -f "${state_file}"
+  fi
   wait_in_progress || return 2
   dispatch_or_resume production-render render-olm-catalog.yaml production "${RELEASE_BRANCH}" \
     --ref "${RELEASE_BRANCH}" -f "branch=${RELEASE_BRANCH}" -f environment=production || return 2
@@ -263,12 +269,71 @@ execute_4_7() {
     run=$(gh run view --repo openshift-pipelines/operator "${RUN_ID}" --json status,conclusion) || return 2
     conclusion=$(jq -r '.conclusion // ""' <<<"${run}")
   fi
-  if [[ "${conclusion}" == failure || "${conclusion}" == cancelled ]]; then
+  if ! ocr_workflow_succeeded "${conclusion}"; then
     rm -f "$(ocr_workflow_state_file production-render)"
+    rm -f "${state_file}"
+    printf 'Production render workflow did not succeed (conclusion=%s); provenance cleared for an explicit retry.\n' "${conclusion:-missing}" >&2
     return 2
   fi
+  if [[ -s "${state_file}" ]]; then
+    IFS='|' read -r number recorded_head recorded_commit_at <"${state_file}"
+  else
+    pr=$(gh pr list --repo openshift-pipelines/operator \
+      --head "actions/update/operator-update-catalog-${RELEASE_BRANCH}" --state all --limit 5 \
+      --json number,url,state,headRefOid,updatedAt) || return 2
+    pr=$(jq 'sort_by(.updatedAt) | last // empty' <<<"${pr}")
+    number=$(jq -r '.number // empty' <<<"${pr}")
+    recorded_head=$(jq -r '.headRefOid // empty' <<<"${pr}")
+    commit=$(gh api "repos/openshift-pipelines/operator/commits/${recorded_head}" 2>/dev/null) || return 2
+    recorded_commit_at=$(jq -r '.commit.committer.date // empty' <<<"${commit}")
+    jq -e '.author.login=="openshift-pipelines-bot" or .author.login=="github-actions[bot]" or .author.login=="red-hat-konflux[bot]"' <<<"${commit}" >/dev/null || return 2
+    [[ "${number}" =~ ^[0-9]+$ && "${recorded_head}" =~ ^[0-9a-f]{40}$ && ("${recorded_commit_at}" == "${CREATED_AT}" || "${recorded_commit_at}" > "${CREATED_AT}") ]] || {
+      printf 'Production catalog PR was not found after the recorded workflow run.\n' >&2
+      return 2
+    }
+    printf '%s|%s|%s\n' "${number}" "${recorded_head}" "${recorded_commit_at}" >"${state_file}"
+  fi
+  pr=$(gh pr view --repo openshift-pipelines/operator "${number}" \
+    --json state,url,headRefOid,mergedAt,mergeCommit) || return 2
+  url=$(jq -r '.url // empty' <<<"${pr}")
+  pr_state=$(jq -r '.state // empty' <<<"${pr}")
+  head_oid=$(jq -r '.headRefOid // empty' <<<"${pr}")
+  [[ "${head_oid}" == "${recorded_head}" ]] || {
+    printf 'Production catalog PR head changed after provenance was recorded; refusing to guess.\n' >&2
+    return 2
+  }
+  commit=$(gh api "repos/openshift-pipelines/operator/commits/${recorded_head}" 2>/dev/null) || return 2
+  jq -e --arg date "${recorded_commit_at}" '(.author.login=="openshift-pipelines-bot" or .author.login=="github-actions[bot]" or .author.login=="red-hat-konflux[bot]") and .commit.committer.date==$date' <<<"${commit}" >/dev/null || {
+    printf 'Recorded catalog head lacks matching post-run bot provenance.\n' >&2
+    return 2
+  }
+  diff=$(gh pr diff --repo openshift-pipelines/operator "${number}") || return 2
+  ocr_diff_has_only_production_images "${diff}" || {
+    printf 'Catalog PR lacks exact production-registry evidence or contains another registry.\n' >&2
+    return 2
+  }
+  if [[ "${pr_state}" != MERGED ]]; then
+    [[ "${pr_state}" == OPEN ]] || {
+      printf 'Recorded production catalog PR is neither open nor merged.\n' >&2
+      return 2
+    }
+    pr_ready "${url}" || {
+      printf 'Production catalog PR is not green and mergeable.\n' >&2
+      return 2
+    }
+    gh pr edit "${url}" --add-label lgtm,approved,one-click-release
+    gh pr review --approve "${url}"
+    gh pr merge "${url}" -d -r --auto
+    printf 'Production catalog PR merge requested; re-run after it merges and index snapshots propagate.\n' >&2
+    return 2
+  fi
+  merged_at=$(jq -r '.mergedAt // empty' <<<"${pr}")
+  merge_sha=$(jq -r '.mergeCommit.oid // empty' <<<"${pr}")
+  [[ -n "${merged_at}" && "${merged_at}" > "${CREATED_AT}" && "${merge_sha}" =~ ^[0-9a-f]{40}$ ]] || {
+    printf 'Merged catalog PR does not follow the recorded production workflow.\n' >&2
+    return 2
+  }
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
-  head=$(git ls-remote https://github.com/openshift-pipelines/operator.git "refs/heads/${RELEASE_BRANCH}" | awk '{print $1}')
   while IFS= read -r app; do
     snapshot=$(ocr_latest_snapshot "${app}")
     if [[ -z "${snapshot}" ]]; then
@@ -278,7 +343,22 @@ execute_4_7() {
     ((found += 1))
     rev=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.spec.components[0].source.git.revision}')
     snapshot_created=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.metadata.creationTimestamp}')
-    [[ "${rev}" == "${head}" && "${snapshot_created}" > "${CREATED_AT}" ]] || stale=true
+    ancestry=$(gh api "repos/openshift-pipelines/operator/compare/${merge_sha}...${rev}" --jq '.status' 2>/dev/null) || {
+      printf 'Unable to prove index snapshot ancestry; refusing a placeholder mutation.\n' >&2
+      return 2
+    }
+    if ocr_operator_release_stage_at "${rev}"; then
+      release_stage=production
+    else
+      stage_rc=$?
+      if ((stage_rc == 1)); then
+        release_stage=nonproduction
+      else
+        printf 'Unable to query catalog state at snapshot revision %s; refusing a placeholder mutation.\n' "${rev}" >&2
+        return 2
+      fi
+    fi
+    [[ ("${ancestry}" == ahead || "${ancestry}" == identical) && "${release_stage}" == production && "${snapshot_created}" > "${merged_at}" ]] || stale=true
   done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("index") and contains($mm)) | .metadata.name' <<<"${apps}")
   ((found > 0)) || stale=true
   if [[ "${stale}" == true ]]; then
@@ -376,4 +456,6 @@ ocr_execute_step() {
   esac
 }
 
-ocr_execute_stage "${1:-}" "${2:-}"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  ocr_execute_stage "${1:-}" "${2:-}"
+fi
