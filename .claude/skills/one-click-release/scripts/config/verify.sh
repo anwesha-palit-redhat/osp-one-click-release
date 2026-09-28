@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC1091,SC2034
+# shellcheck disable=SC1091,SC2034,SC2153
 set -euo pipefail
 
 STAGE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -45,10 +45,13 @@ verify_1_1() {
   }
   current=$(awk '/release-tag:/ {print $2; exit}' <<<"${cfg}")
   runs=$(gh run list --repo openshift-pipelines/hack --workflow=release-new-patch.yaml --limit 3 \
-    --json status,conclusion,displayTitle,url 2>/dev/null || printf '[]')
+    --json status,conclusion,createdAt,displayTitle,url 2>/dev/null || printf '[]')
   url=$(jq -r --arg mm "${MAJOR_MINOR}" '[.[] | select(.displayTitle | contains($mm))][0].url // .[0].url // empty' <<<"${runs}")
   [[ -n "${url}" ]] && STEP_LINKS="[release-new-patch](${url})"
   STEP_DETAILS="release-tag: ${current:-missing} (expected ${VERSION})"
+  if [[ -n "${url}" ]]; then
+    STEP_DETAILS+="; workflow $(jq -r --arg url "${url}" '.[] | select(.url==$url) | "\(.status)/\(.conclusion) at \(.createdAt)"' <<<"${runs}" | head -1)"
+  fi
   if [[ "${current}" != "${VERSION}" ]]; then
     prs=$(gh pr list --repo openshift-pipelines/hack --head "actions/main/new-patch-${MAJOR_MINOR}" \
       --state open --limit 1 --json number,url 2>/dev/null || printf '[]')
@@ -86,12 +89,15 @@ verify_1_3() {
   number=$(jq -r '.[0].number // empty' <<<"${prs}")
   url=$(jq -r '.[0].url // empty' <<<"${prs}")
   runs=$(gh run list --repo openshift-pipelines/hack --workflow=generate-konflux.yaml --limit 3 \
-    --json status,conclusion,displayTitle,url 2>/dev/null || printf '[]')
+    --json status,conclusion,createdAt,displayTitle,url 2>/dev/null || printf '[]')
   run_url=$(jq -r '.[0].url // empty' <<<"${runs}")
   STEP_LINKS='—'
   [[ -n "${number}" ]] && STEP_LINKS="hack [#${number}](${url})"
   [[ -n "${run_url}" ]] && STEP_LINKS+="${STEP_LINKS:+, }[generate-konflux](${run_url})"
   STEP_DETAILS="Konflux config PR: ${state:-not found}"
+  if [[ -n "${run_url}" ]]; then
+    STEP_DETAILS+="; workflow $(jq -r --arg url "${run_url}" '.[] | select(.url==$url) | "\(.status)/\(.conclusion) at \(.createdAt)"' <<<"${runs}" | head -1)"
+  fi
   [[ "${state}" == MERGED ]] || return "${OCR_RC_BLOCKED}"
 }
 
@@ -124,22 +130,28 @@ verify_1_4() {
     printf '%s\t%s\t%s\n' "${dir}" "${cluster_app}" "$(paste -sd, <<<"${expected_components}")" >>"${temp}/expected.tsv"
   done <<<"${expected}"
   result=$(
-    python3 - "${temp}" <<'PY'
+    python3 - "${temp}" "${REPORT_BASE}/.state/config-applications.tsv" <<'PY'
 import json, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 apps = {i['metadata']['name'] for i in json.load(open(p/'apps.json'))['items']}
 components = json.load(open(p/'components.json'))['items']
-bad=[]; count=0
+bad=[]; count=0; rows=[]
 for line in open(p/'expected.tsv'):
     directory, app, expected = line.rstrip('\n').split('\t')
     count += 1
     if app not in apps:
         bad.append(f'{directory}:MISSING_APP')
+        rows.append((directory, expected, '', 'MISSING'))
         continue
     want={x for x in expected.split(',') if x}
     have={i['metadata']['name'] for i in components if i.get('spec',{}).get('application') == app}
     if want != have:
         bad.append(f'{directory}:DRIFT({len(want)} expected/{len(have)} actual)')
+        rows.append((directory, ','.join(sorted(want)), ','.join(sorted(have)), 'DRIFT'))
+    else:
+        rows.append((directory, ','.join(sorted(want)), ','.join(sorted(have)), 'OK'))
+with open(sys.argv[2], 'w') as out:
+    for row in rows: out.write('\t'.join(row)+'\n')
 print(f'{count}|'+','.join(bad))
 PY
   )
@@ -225,6 +237,7 @@ latest_in_series() {
 verify_1_8() {
   local open versions cfg count mismatches='' component key repo branch series current latest cmp
   : >"${REPORT_BASE}/.state/opc-version-mismatches"
+  : >"${REPORT_BASE}/.state/opc-version-comparison.tsv"
   open=$(gh pr list --repo openshift-pipelines/opc --base "${RELEASE_BRANCH}" --state open \
     --search 'Update component versions in:title' --json number,url,mergeable,mergeStateStatus)
   local opc_bump
@@ -243,15 +256,22 @@ verify_1_8() {
   }
   cfg=$(gh_content "repos/openshift-pipelines/hack/contents/config/downstream/releases/${MAJOR_MINOR}.yaml")
   while IFS='|' read -r component key repo; do
+    current=$(jq -r --arg k "${component}" '.[$k] // empty' <<<"${versions}" | sed 's/^v//')
     branch=$(release_branch_value "${cfg}" "${key}")
     [[ -n "${branch}" ]] || {
-      mismatches+=" ${component}:UNKNOWN"
-      continue
+      if [[ "${component}" == assist && "${current}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        series=${current%.*}
+      else
+        mismatches+=" ${component}:UNKNOWN"
+        continue
+      fi
     }
-    series=${branch#release-v}
-    series=${series%.x}
-    current=$(jq -r --arg k "${component}" '.[$k] // empty' <<<"${versions}" | sed 's/^v//')
+    if [[ -n "${branch}" ]]; then
+      series=${branch#release-v}
+      series=${series%.x}
+    fi
     latest=$(latest_in_series "${repo}" "${series}")
+    printf '%s\t%s\t%s\t%s\t%s\n' "${component}" "${series}" "${current:-missing}" "${latest:-unknown}" "$([[ -n "${current}" && "${current}" == "${latest}" ]] && echo CURRENT || echo CHECK)" >>"${REPORT_BASE}/.state/opc-version-comparison.tsv"
     if [[ -z "${current}" || -z "${latest}" ]]; then
       mismatches+=" ${component}:UNKNOWN"
     elif [[ "${current}" != "${latest}" ]]; then
@@ -263,6 +283,7 @@ pac|pipelines-as-code|openshift-pipelines/pipelines-as-code
 tkn|tektoncd-cli|tektoncd/cli
 results|tektoncd-results|tektoncd/results
 manualapprovalgate|manual-approval-gate|openshift-pipelines/manual-approval-gate
+assist|tekton-assist|openshift-pipelines/tekton-assist
 EOF
   current=$(jq -r '.opc // empty' <<<"${versions}" | sed 's/^v//')
   [[ "${current}" == "${VERSION}" ]] || mismatches+=" opc:${current:-missing}->${VERSION}"
@@ -297,6 +318,7 @@ verify_1_10() {
   }
   sources=$(gh api "repos/openshift-pipelines/serve-tkn-cli/contents/sources?ref=${RELEASE_BRANCH}") || return "${OCR_RC_BLOCKED}"
   temp=$(mktemp)
+  : >"${REPORT_BASE}/.state/submodule-comparison.tsv"
   printf '%s\n' "${modules}" >"${temp}"
   while IFS= read -r path; do
     url=$(git config -f "${temp}" --get-regexp '\.path$' | awk -v p="${path}" '$2==p {sub(/\.path$/, ".url", $1); print $1}' | xargs -r git config -f "${temp}" --get)
@@ -306,6 +328,7 @@ verify_1_10() {
     repo=${repo#git@github.com:}
     actual=$(jq -r --arg n "${path#sources/}" '.[] | select(.name==$n) | .sha' <<<"${sources}")
     expected=$(gh api "repos/${repo}/commits/${branch}" --jq '.sha' 2>/dev/null || true)
+    printf '%s\t%s\t%s\t%s\n' "${path}" "${actual}" "${expected}" "$([[ -n "${actual}" && "${actual}" == "${expected}" ]] && echo CURRENT || echo STALE)" >>"${REPORT_BASE}/.state/submodule-comparison.tsv"
     [[ -n "${actual}" && "${actual}" == "${expected}" ]] || mismatches+=" ${path}"
   done < <(git config -f "${temp}" --get-regexp '\.path$' | awk '{print $2}')
   rm -f "${temp}"
@@ -323,10 +346,15 @@ verify_1_11() {
     STEP_DETAILS="product version YAML ${VERSION}.yaml not found"
     return "${OCR_RC_BLOCKED}"
   }
-  local found
+  local found ga hidden invisible release_date
   found=$(awk -F: '/versionName:/ {print $2; exit}' <<<"${body}" | tr -d ' "' | tr -d "'")
-  STEP_DETAILS="versionName: ${found:-missing}"
-  [[ "${found}" == "${VERSION}" ]] || return "${OCR_RC_BLOCKED}"
+  ga=$(awk -F: '/^[[:space:]]*ga:/ {print $2; exit}' <<<"${body}" | tr -d ' "' | tr -d "'")
+  hidden=$(awk -F: '/^[[:space:]]*hidden:/ {print $2; exit}' <<<"${body}" | tr -d ' "' | tr -d "'")
+  invisible=$(awk -F: '/^[[:space:]]*invisible:/ {print $2; exit}' <<<"${body}" | tr -d ' "' | tr -d "'")
+  release_date=$(awk '/^[[:space:]]*releaseDate:/ {sub(/^[^:]*:[[:space:]]*/, ""); print; exit}' <<<"${body}" | tr -d "\"'")
+  printf '%s\t%s\t%s\t%s\t%s\n' "${found}" "${ga}" "${hidden}" "${invisible}" "${release_date}" >"${REPORT_BASE}/.state/product-version-metadata.tsv"
+  STEP_DETAILS="versionName=${found:-missing}; ga=${ga:-missing}; hidden=${hidden:-missing}; invisible=${invisible:-missing}; releaseDate=${release_date:-missing}; config says invisible=false while CDN step requires true until release, so both booleans are reported and accepted here"
+  [[ "${found}" == "${VERSION}" && "${ga}" =~ ^(true|false)$ && "${hidden}" == false && "${invisible}" =~ ^(true|false)$ && "${release_date}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || return "${OCR_RC_BLOCKED}"
 }
 
 verify_1_12() {
@@ -349,6 +377,31 @@ ocr_verify_step() {
     1.5) verify_1_5 ;; 1.6) verify_1_6 ;; 1.7) verify_1_7 ;; 1.8) verify_1_8 ;;
     1.9) verify_1_9 ;; 1.10) verify_1_10 ;; 1.11) verify_1_11 ;; 1.12) verify_1_12 ;;
   esac
+}
+
+ocr_report_stage_details() {
+  local file
+  file="${REPORT_BASE}/.state/config-applications.tsv"
+  if [[ -s "${file}" ]]; then
+    printf '\n## Application and Component Parity\n\n| Application | Hack Repo Components | Cluster Components | Status |\n|-------------|----------------------|--------------------|--------|\n'
+    while IFS=$'\t' read -r app expected actual status; do printf '| %s | %s | %s | %s |\n' "${app}" "${expected:-—}" "${actual:-—}" "${status}"; done <"${file}"
+  fi
+  file="${REPORT_BASE}/.state/opc-version-comparison.tsv"
+  if [[ -s "${file}" ]]; then
+    printf '\n## Component Version Comparison\n\n| Component | Tracked Series | version.json | Latest Upstream | Status |\n|-----------|----------------|--------------|-----------------|--------|\n'
+    while IFS=$'\t' read -r component series current latest status; do printf '| %s | %s | %s | %s | %s |\n' "${component}" "${series}" "${current}" "${latest}" "${status}"; done <"${file}"
+  fi
+  file="${REPORT_BASE}/.state/submodule-comparison.tsv"
+  if [[ -s "${file}" ]]; then
+    printf '\n## Submodule SHA Comparison\n\n| Source | Current SHA | Expected SHA | Status |\n|--------|-------------|--------------|--------|\n'
+    while IFS=$'\t' read -r path actual expected status; do printf '| %s | %s | %s | %s |\n' "${path}" "${actual:0:12}" "${expected:0:12}" "${status}"; done <"${file}"
+  fi
+  file="${REPORT_BASE}/.state/product-version-metadata.tsv"
+  if [[ -s "${file}" ]]; then
+    local version ga hidden invisible release_date
+    IFS=$'\t' read -r version ga hidden invisible release_date <"${file}"
+    printf '\n## Product Version Metadata\n\n- **versionName:** %s\n- **ga:** %s\n- **hidden:** %s\n- **invisible:** %s\n- **releaseDate:** %s\n' "${version}" "${ga}" "${hidden}" "${invisible}" "${release_date}"
+  fi
 }
 
 ocr_verify_stage "${1:-}"

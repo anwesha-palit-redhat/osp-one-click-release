@@ -14,6 +14,16 @@ ocr_release_condition() {
     -o jsonpath='Released={.status.conditions[?(@.type=="Released")].status} Reason={.status.conditions[?(@.type=="Released")].reason}'
 }
 
+ocr_latest_successful_release_snapshot() {
+  local data=$1 kind=$2 environment=$3 exclude=${4:-}
+  jq -r --arg mm "${MM_DASHED}" --arg kind "${kind}" --arg env "${environment}" --arg exclude "${exclude}" '
+    [.items[] | select(.spec.releasePlan | contains($mm) and contains($kind) and contains($env))
+      | select($exclude=="" or (.spec.releasePlan|contains($exclude)|not))
+      | select(any(.status.conditions[]?; .type=="Released" and .status=="True"))
+      | {snapshot:.spec.snapshot,created:(.metadata.creationTimestamp // "")}]
+    | sort_by(.created) | last.snapshot // empty' <<<"${data}"
+}
+
 ocr_write_release_manifest() {
   local path=$1 app=$2 release_plan=$3 snapshot=$4
   mkdir -p "$(dirname "${path}")"

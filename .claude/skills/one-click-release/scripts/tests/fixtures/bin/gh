@@ -3,7 +3,14 @@ set -euo pipefail
 
 printf '%s\n' "$*" >>"${OCR_TEST_COMMAND_LOG:?}"
 
+if [[ "${OCR_TEST_GH_SCENARIO:-}" == api_fail && " $* " == *" search prs "* ]]; then
+  printf 'simulated authentication failure: token fixture-secret rejected\n' >&2
+  exit 1
+fi
+
 case " $* " in
+  *" run view "*" 12345 --log "*) printf '%s\n' 'make ENVIRONMENT=production update-reference' ;;
+  *" run view "*" 12346 --log "*) printf '%s\n' 'make ENVIRONMENT=staging update-reference' ;;
   *" workflow run "*) exit 0 ;;
   *" run list "*) printf '[]\n' ;;
   *" pr list "*)
@@ -16,6 +23,13 @@ case " $* " in
   *" search prs "*) printf '[]\n' ;;
   *" api repos/openshift-pipelines/hack/contents/config/downstream/releases/1.21.yaml "*)
     printf '%s' $'release-tag: 1.21.2\ncode-freeze: false\n' | base64
+    ;;
+  *" api repos/openshift-pipelines/operator/compare/old...new "*)
+    if [[ "${OCR_TEST_GH_SCENARIO:-}" == generated_good ]]; then
+      printf '%s\n' '{"commits":[{"author":{"login":"github-actions[bot]"}}],"files":[{"filename":".konflux/olm-catalog/index/.placeholder"}]}'
+    else
+      printf '%s\n' '{"commits":[{"author":{"login":"human"}}],"files":[{"filename":"pkg/release.go"}]}'
+    fi
     ;;
   *) printf '[]\n' ;;
 esac

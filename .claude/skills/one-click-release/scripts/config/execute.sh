@@ -52,6 +52,7 @@ execute_1_3() { merge_head_pr openshift-pipelines/hack "actions/update/hack-upda
 
 execute_1_4() {
   ocr_require_konflux || return 2
+  ocr_require_command kubectl || return 2
   local temp
   temp=$(mktemp -d)
   trap 'rm -rf "${temp}"' RETURN
@@ -65,8 +66,7 @@ execute_1_4() {
   local -a file_args=()
   local file
   for file in "${files[@]}"; do file_args+=(-f "${file}"); done
-  kubectl apply --server="${KONFLUX_SERVER}" --token="${KONFLUX_TOKEN}" \
-    --insecure-skip-tls-verify -n "${KONFLUX_NS}" "${file_args[@]}"
+  kubectl apply -n "${KONFLUX_NS}" "${file_args[@]}"
   rm -rf "${temp}"
   trap - RETURN
 }

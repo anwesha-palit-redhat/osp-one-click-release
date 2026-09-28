@@ -20,6 +20,8 @@ ocr_md_cell() {
 
 ocr_report_add() {
   local step=$1 title=$2 status=$3 details=${4:-—} links=${5:-—}
+  details=$(ocr_redact "${details}")
+  links=$(ocr_redact "${links}")
   printf '%s\t%s\t%s\t%s\t%s\n' \
     "${step}" "${title}" "${status}" \
     "$(ocr_md_cell "${details}")" "$(ocr_md_cell "${links}")" \
@@ -47,13 +49,42 @@ ocr_report_write() {
     done <"${OCR_REPORT_ROWS}"
     if [[ "${OCR_STAGE}" == build || "${OCR_STAGE}" == production-release ]]; then
       printf '\n## Release Manifests\n\n'
-      printf '| File |\n|------|\n'
-      local manifest found=false
+      printf '| File | Application | Release Plan | Snapshot |\n'
+      printf '|------|-------------|--------------|----------|\n'
+      local manifest found=false manifest_dir
+      if [[ "${OCR_STAGE}" == build ]]; then manifest_dir=stage; else manifest_dir=prod; fi
       while IFS= read -r manifest; do
         found=true
-        printf '| %s |\n' "${manifest#"${REPORT_BASE}"/}"
-      done < <(find "${REPORT_BASE}/manifest" -type f -name "release-${VERSION}-*.yaml" -print | sort)
-      [[ "${found}" == true ]] || printf '| — |\n'
+        local app rp snapshot
+        app=$(awk '/appstudio.openshift.io\/application:/ {print $2; exit}' "${manifest}")
+        rp=$(awk '/^  releasePlan:/ {print $2; exit}' "${manifest}")
+        snapshot=$(awk '/^  snapshot:/ {print $2; exit}' "${manifest}")
+        printf '| %s | %s | %s | %s |\n' "${manifest#"${REPORT_BASE}"/}" "${app:-—}" "${rp:-—}" "${snapshot:-—}"
+      done < <(find "${REPORT_BASE}/manifest/${manifest_dir}" -type f -name "release-${VERSION}-*.yaml" -print | sort)
+      [[ "${found}" == true ]] || printf '| — | — | — | — |\n'
+    fi
+    if [[ "${OCR_STAGE}" == image-copy && -s "${REPORT_BASE}/.state/image-copy-images.tsv" ]]; then
+      printf '\n## Index Image Evidence\n\n'
+      printf '| Release | Release Plan | Snapshot | IIB Source | OCP Version | Quay Target |\n'
+      printf '|---------|--------------|----------|------------|-------------|-------------|\n'
+      while IFS=$'\t' read -r release rp _status image ocp target snapshot; do
+        printf '| %s | %s | %s | %s | %s | %s |\n' "${release}" "${rp}" "${snapshot:-—}" "${image}" "${ocp}" "${target}"
+      done <"${REPORT_BASE}/.state/image-copy-images.tsv"
+    fi
+    local workflow_state workflow_found=false
+    for workflow_state in "${REPORT_BASE}"/.state/workflow-*.state; do
+      [[ -f "${workflow_state}" ]] || continue
+      if [[ "${workflow_found}" == false ]]; then
+        printf '\n## Workflow Provenance\n\n| Workflow | Environment | Branch | Run ID | Created |\n|----------|-------------|--------|--------|---------|\n'
+        workflow_found=true
+      fi
+      WORKFLOW='' ENVIRONMENT='' BRANCH='' RUN_ID='' CREATED_AT=''
+      # shellcheck disable=SC1090
+      source "${workflow_state}"
+      printf '| %s | %s | %s | %s | %s |\n' "${WORKFLOW}" "${ENVIRONMENT}" "${BRANCH}" "${RUN_ID}" "$(ocr_abs_time "${CREATED_AT}")"
+    done
+    if declare -F ocr_report_stage_details >/dev/null; then
+      ocr_report_stage_details || true
     fi
     if [[ -n "${OCR_BLOCKING_STEP}" ]]; then
       printf '\n## Blocking Step\n\n'

@@ -41,17 +41,17 @@ find_prod_rp() {
 
 successful_snapshot() {
   local kind=$1 env=$2 exclude=${3:-}
-  ocr_oc_get releases -o json | jq -r --arg mm "${MM_DASHED}" --arg kind "${kind}" --arg env "${env}" --arg exclude "${exclude}" '
-    [.items[] | select(.spec.releasePlan | contains($mm) and contains($kind) and contains($env))
-      | select($exclude=="" or (.spec.releasePlan|contains($exclude)|not))
-      | select(any(.status.conditions[]?; .type=="Released" and .status=="True"))][-1].spec.snapshot // empty'
+  local data
+  data=$(ocr_oc_get releases -o json) || return 1
+  ocr_latest_successful_release_snapshot "${data}" "${kind}" "${env}" "${exclude}"
 }
 
 existing_release_for_snapshot() {
   local rp=$1 snapshot=$2
   ocr_oc_get releases -o json | jq -r --arg rp "${rp}" --arg snapshot "${snapshot}" '
     [.items[] | select(.spec.releasePlan==$rp and .spec.snapshot==$snapshot)
-      | {name:.metadata.name,status:([.status.conditions[]? | select(.type=="Released")][0].status // "Unknown")}][-1]
+      | {name:.metadata.name,status:([.status.conditions[]? | select(.type=="Released")][0].status // "Unknown"),created:(.metadata.creationTimestamp // "")}
+      | sort_by(.created)][-1]
       | if . == null then empty else "\(.name)|\(.status)" end'
 }
 
@@ -93,8 +93,10 @@ create_prod_release() {
   if [[ -n "${existing}" ]]; then
     existing_name=${existing%%|*}
     existing_status=${existing#*|}
-    printf 'Release %s already exists for this snapshot (Released=%s); not creating a duplicate.\n' "${existing_name}" "${existing_status}" >&2
-    [[ "${existing_status}" == True ]] && return 0 || return 2
+    printf 'Release %s already exists for this snapshot (Released=%s).\n' "${existing_name}" "${existing_status}" >&2
+    [[ "${existing_status}" == True ]] && return 0
+    [[ "${existing_status}" == False ]] || return 2
+    printf 'The latest attempt failed; creating the supported retry Release CR.\n' >&2
   fi
   path="${REPORT_BASE}/manifest/prod/release-${VERSION}-${kind}-prod.yaml"
   ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
@@ -108,33 +110,87 @@ execute_4_1() {
 
 execute_4_2() {
   ocr_require_konflux || return 2
-  local snapshot
-  snapshot=$(successful_snapshot core stage cdn)
+  local snapshot current app
+  if [[ -f "${REPORT_BASE}/.state/stage-core-snapshot" ]]; then snapshot=$(<"${REPORT_BASE}/.state/stage-core-snapshot"); else snapshot=''; fi
   [[ -n "${snapshot}" ]] || {
     printf 'No succeeded core stage snapshot found.\n' >&2
+    return 2
+  }
+  app=$(find_app core)
+  current=$(ocr_latest_snapshot "${app}")
+  [[ "${snapshot}" == "${current}" ]] || {
+    printf 'Pinned stage core snapshot %s is no longer current (%s). Re-run verification.\n' "${snapshot}" "${current:-missing}" >&2
+    return 2
+  }
+  [[ "$(successful_snapshot core stage cdn)" == "${snapshot}" ]] || {
+    printf 'Pinned core snapshot no longer has a successful stage release.\n' >&2
     return 2
   }
   create_prod_release core "${snapshot}"
 }
 
-execute_4_3() {
-  local runs in_progress successful id
-  runs=$(gh run list --repo openshift-pipelines/operator --workflow=operator-update-images.yaml --limit 10 \
-    --json databaseId,status,conclusion,event,displayTitle,headBranch)
-  in_progress=$(jq -r --arg b "${RELEASE_BRANCH}" '.[] | select(.event=="workflow_dispatch" and (.status=="queued" or .status=="in_progress"))
-    | select((.displayTitle//"")|contains($b) or (.headBranch//"")==$b) | .databaseId' <<<"${runs}")
-  if [[ -n "${in_progress}" ]]; then
-    while IFS= read -r id; do gh run watch --repo openshift-pipelines/operator "${id}"; done <<<"${in_progress}"
-    return
+dispatch_or_resume() {
+  local key=$1 workflow=$2 environment=$3 branch=$4 pending before dispatched ids run count id created i
+  shift 4
+  if ocr_workflow_provenance_matches "${key}" "${workflow}" "${environment}" "${branch}"; then return 0; fi
+  pending="${REPORT_BASE}/.state/workflow-${key}.pending"
+  if [[ ! -f "${pending}" ]]; then
+    before=$(gh run list --repo openshift-pipelines/operator --workflow="${workflow}" --limit 30 --json databaseId) || return 2
+    ids=$(jq -r 'map(.databaseId|tostring)|join(",")' <<<"${before}")
+    dispatched=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+    {
+      printf 'BASELINE_IDS=%q\n' "${ids}"
+      printf 'DISPATCHED_AT=%q\n' "${dispatched}"
+    } >"${pending}"
+    if ! gh workflow run "${workflow}" --repo openshift-pipelines/operator "$@"; then
+      rm -f "${pending}"
+      return 2
+    fi
   fi
-  successful=$(jq -r --arg b "${RELEASE_BRANCH}" '[.[] | select(.event=="workflow_dispatch" and .status=="completed" and .conclusion=="success")
-    | select((.displayTitle//"")|contains($b) or (.headBranch//"")==$b)][0].databaseId // empty' <<<"${runs}")
-  if [[ -n "${successful}" ]]; then
-    printf 'A successful production dispatch already exists; wait for its CSV PR instead of dispatching again.\n' >&2
+  BASELINE_IDS='' DISPATCHED_AT=''
+  # shellcheck disable=SC1090
+  source "${pending}"
+  for i in {1..10}; do
+    run=$(gh run list --repo openshift-pipelines/operator --workflow="${workflow}" --limit 30 \
+      --json databaseId,event,headBranch,createdAt,url) || return 2
+    run=$(jq --arg baseline ",${BASELINE_IDS}," --arg branch "${branch}" --arg at "${DISPATCHED_AT}" '
+      [.[] | select(.event=="workflow_dispatch" and .headBranch==$branch and .createdAt >= $at)
+       | select(($baseline|contains(","+(.databaseId|tostring)+","))|not)]' <<<"${run}")
+    count=$(jq length <<<"${run}")
+    if ((count == 1)); then break; fi
+    if ((count > 1)); then
+      printf 'Multiple new %s runs make dispatch provenance ambiguous; refusing to guess.\n' "${workflow}" >&2
+      return 2
+    fi
+    sleep 1
+  done
+  ((count == 1)) || {
+    printf 'Dispatched %s but its run ID is not visible yet; retry will recover without redispatching.\n' "${workflow}" >&2
     return 2
+  }
+  id=$(jq -r '.[0].databaseId' <<<"${run}")
+  created=$(jq -r '.[0].createdAt' <<<"${run}")
+  ocr_record_workflow_run "${key}" "${workflow}" "${environment}" "${branch}" "${id}" "${created}"
+  rm -f "${pending}"
+  ocr_load_workflow_run "${key}"
+}
+
+execute_4_3() {
+  local run status conclusion
+  dispatch_or_resume production-csv operator-update-images.yaml production "${RELEASE_BRANCH}" \
+    --ref "${RELEASE_BRANCH}" -f environment=production || return 2
+  run=$(gh run view --repo openshift-pipelines/operator "${RUN_ID}" --json status,conclusion) || return 2
+  status=$(jq -r '.status' <<<"${run}")
+  conclusion=$(jq -r '.conclusion // ""' <<<"${run}")
+  if [[ "${status}" != completed ]]; then
+    gh run watch --repo openshift-pipelines/operator "${RUN_ID}" || return 2
+    run=$(gh run view --repo openshift-pipelines/operator "${RUN_ID}" --json status,conclusion) || return 2
+    conclusion=$(jq -r '.conclusion // ""' <<<"${run}")
   fi
-  gh workflow run operator-update-images.yaml --repo openshift-pipelines/operator \
-    --ref "${RELEASE_BRANCH}" -f environment=production
+  [[ "${conclusion}" != failure && "${conclusion}" != cancelled ]] || {
+    rm -f "$(ocr_workflow_state_file production-csv)"
+    return 2
+  }
 }
 
 pr_ready() {
@@ -147,17 +203,21 @@ pr_ready() {
 }
 
 execute_4_4() {
-  local pr url diff
-  pr=$(gh pr list --repo openshift-pipelines/operator --head "actions/update/operator-update-images-${RELEASE_BRANCH}" \
-    --state open --limit 1 --json number,url)
-  url=$(jq -r '.[0].url // empty' <<<"${pr}")
-  [[ -n "${url}" ]] || {
-    printf 'Production CSV PR not found.\n' >&2
+  local number pr url diff
+  if [[ -f "${REPORT_BASE}/.state/production-csv-pr" ]]; then number=$(<"${REPORT_BASE}/.state/production-csv-pr"); else number=''; fi
+  [[ "${number}" =~ ^[0-9]+$ ]] || {
+    printf 'Exact production CSV PR provenance is missing.\n' >&2
+    return 2
+  }
+  pr=$(gh pr view --repo openshift-pipelines/operator "${number}" --json state,url) || return 2
+  url=$(jq -r '.url // empty' <<<"${pr}")
+  [[ "$(jq -r '.state // empty' <<<"${pr}")" == OPEN && -n "${url}" ]] || {
+    printf 'Recorded production CSV PR #%s is not open.\n' "${number}" >&2
     return 2
   }
   diff=$(gh pr diff "${url}")
-  if grep -E '^\+.*image:.*(stage|staging)' <<<"${diff}" >/dev/null; then
-    printf 'Production CSV PR contains staging references; refusing to merge.\n' >&2
+  if grep -Ei '^\+.*image:.*(stage|staging|devel)' <<<"${diff}" >/dev/null; then
+    printf 'Production CSV PR contains non-production references; refusing to merge.\n' >&2
     return 2
   fi
   pr_ready "${url}" || {
@@ -183,31 +243,51 @@ execute_4_6() {
 }
 
 wait_in_progress() {
-  local id
-  while IFS= read -r id; do [[ -n "${id}" ]] && gh run watch --repo openshift-pipelines/operator "${id}"; done \
-    < <(gh run list --repo openshift-pipelines/operator --workflow=render-olm-catalog.yaml --limit 5 \
-      --json databaseId,status --jq '.[] | select(.status=="in_progress" or .status=="queued") | .databaseId')
+  local id ids
+  ids=$(gh run list --repo openshift-pipelines/operator --workflow=render-olm-catalog.yaml --limit 5 \
+    --json databaseId,status --jq '.[] | select(.status=="in_progress" or .status=="queued") | .databaseId') || return 2
+  while IFS= read -r id; do [[ -n "${id}" ]] && gh run watch --repo openshift-pipelines/operator "${id}"; done <<<"${ids}"
 }
 
 execute_4_7() {
   ocr_require_konflux || return 2
-  local id apps head app snapshot rev stale=false
-  wait_in_progress
-  gh workflow run render-olm-catalog.yaml --repo openshift-pipelines/operator \
-    -f "branch=${RELEASE_BRANCH}" -f environment=production
-  id=$(gh run list --repo openshift-pipelines/operator --workflow=render-olm-catalog.yaml --limit 5 \
-    --json databaseId,event --jq '[.[] | select(.event=="workflow_dispatch")][0].databaseId // empty')
-  [[ -n "${id}" ]] && gh run watch --repo openshift-pipelines/operator "${id}"
+  local apps head app snapshot rev snapshot_created stale=false found=0 run status conclusion
+  wait_in_progress || return 2
+  dispatch_or_resume production-render render-olm-catalog.yaml production "${RELEASE_BRANCH}" \
+    --ref "${RELEASE_BRANCH}" -f "branch=${RELEASE_BRANCH}" -f environment=production || return 2
+  run=$(gh run view --repo openshift-pipelines/operator "${RUN_ID}" --json status,conclusion) || return 2
+  status=$(jq -r '.status' <<<"${run}")
+  conclusion=$(jq -r '.conclusion // ""' <<<"${run}")
+  if [[ "${status}" != completed ]]; then
+    gh run watch --repo openshift-pipelines/operator "${RUN_ID}" || return 2
+    run=$(gh run view --repo openshift-pipelines/operator "${RUN_ID}" --json status,conclusion) || return 2
+    conclusion=$(jq -r '.conclusion // ""' <<<"${run}")
+  fi
+  if [[ "${conclusion}" == failure || "${conclusion}" == cancelled ]]; then
+    rm -f "$(ocr_workflow_state_file production-render)"
+    return 2
+  fi
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
   head=$(git ls-remote https://github.com/openshift-pipelines/operator.git "refs/heads/${RELEASE_BRANCH}" | awk '{print $1}')
   while IFS= read -r app; do
     snapshot=$(ocr_latest_snapshot "${app}")
-    [[ -n "${snapshot}" ]] || continue
+    if [[ -z "${snapshot}" ]]; then
+      stale=true
+      continue
+    fi
+    ((found += 1))
     rev=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.spec.components[0].source.git.revision}')
-    [[ "${rev}" == "${head}" ]] || stale=true
+    snapshot_created=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.metadata.creationTimestamp}')
+    [[ "${rev}" == "${head}" && "${snapshot_created}" > "${CREATED_AT}" ]] || stale=true
   done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("index") and contains($mm)) | .metadata.name' <<<"${apps}")
+  ((found > 0)) || stale=true
   if [[ "${stale}" == true ]]; then
+    if ocr_mutation_done production-index-placeholder; then
+      printf 'Production index rebuild was already pushed; waiting for its snapshot instead of repeating it.\n'
+      return 2
+    fi
     push_operator_placeholder .konflux/olm-catalog/index/.placeholder 'One Click Release: rebuild index images for production'
+    ocr_mark_mutation production-index-placeholder
   fi
 }
 
@@ -233,10 +313,14 @@ execute_4_8() {
       existing_name=${existing%%|*}
       existing_status=${existing#*|}
       printf 'Release %s already exists for %s (Released=%s); skipping duplicate creation.\n' "${existing_name}" "${app}" "${existing_status}"
-      if [[ "${existing_status}" != False ]]; then
+      if [[ "${existing_status}" == True ]]; then
         ((made += 1))
         continue
       fi
+      [[ "${existing_status}" == False ]] || {
+        printf 'Existing release %s is still pending; refusing a duplicate.\n' "${existing_name}" >&2
+        return 2
+      }
     fi
     ocp=${app#openshift-pipelines-index-}
     ocp=${ocp%-"${MM_DASHED}"}
@@ -266,8 +350,10 @@ execute_4_9() {
   if [[ -n "${existing}" ]]; then
     existing_name=${existing%%|*}
     existing_status=${existing#*|}
-    printf 'CDN release %s already exists for this snapshot (Released=%s); not creating a duplicate.\n' "${existing_name}" "${existing_status}" >&2
-    [[ "${existing_status}" == True ]] && return 0 || return 2
+    printf 'CDN release %s already exists for this snapshot (Released=%s).\n' "${existing_name}" "${existing_status}" >&2
+    [[ "${existing_status}" == True ]] && return 0
+    [[ "${existing_status}" == False ]] || return 2
+    printf 'The latest CDN attempt failed; creating a retry Release CR.\n' >&2
   fi
   path="${REPORT_BASE}/manifest/prod/release-${VERSION}-cdn-prod.yaml"
   {

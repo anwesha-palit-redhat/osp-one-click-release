@@ -33,9 +33,13 @@ release_status_json() {
 }
 
 verify_2_1() {
-  local prs count
+  local prs count error
   prs=$(gh search prs --owner openshift-pipelines --base "${RELEASE_BRANCH}" --state open \
-    --json repository,url,title,labels 'label:hack,upstream,automated' 2>/dev/null || printf '[]')
+    --json repository,url,title,labels 'label:hack,upstream,automated' 2>"${REPORT_BASE}/.state/gh-error") || {
+    error=$(<"${REPORT_BASE}/.state/gh-error")
+    ocr_fail_with_error 'unable to query release PRs' "${error}"
+    return $?
+  }
   count=$(jq length <<<"${prs}")
   STEP_DETAILS="${count} open release PRs"
   if ((count > 0)); then
@@ -70,12 +74,14 @@ for c in json.load(sys.stdin):
 for repo,revs in sorted(repos.items()): print(repo+"|"+",".join(sorted(revs)))
 ' <<<"${components}")
   local repo revs head
+  : >"${REPORT_BASE}/.state/core-snapshot-comparison.tsv"
   while IFS='|' read -r repo revs; do
     [[ -n "${repo}" ]] || continue
     head=$(git ls-remote "https://github.com/${repo}.git" "refs/heads/${RELEASE_BRANCH}" | awk '{print $1}')
     if [[ "${revs}" == *,* || "${revs}" != "${head}" ]]; then
       stale+=" ${repo}"
     fi
+    printf '%s\t%s\t%s\t%s\n' "${repo}" "${revs}" "${head}" "$([[ "${revs}" != *,* && "${revs}" == "${head}" ]] && echo CURRENT || echo STALE)" >>"${REPORT_BASE}/.state/core-snapshot-comparison.tsv"
   done <<<"${rows}"
   STEP_DETAILS="snapshot ${snapshot}; all non-operator repos current"
   if [[ -n "${stale}" ]]; then
@@ -109,9 +115,13 @@ verify_2_3() {
 }
 
 verify_2_4() {
-  local prs count
+  local prs count error
   prs=$(gh search prs --owner openshift-pipelines --base "${RELEASE_BRANCH}" --state open \
-    --json repository,url,title,labels 'label:konflux-nudge' 2>/dev/null || printf '[]')
+    --json repository,url,title,labels 'label:konflux-nudge' 2>"${REPORT_BASE}/.state/gh-error") || {
+    error=$(<"${REPORT_BASE}/.state/gh-error")
+    ocr_fail_with_error 'unable to query nudge PRs' "${error}"
+    return $?
+  }
   count=$(jq length <<<"${prs}")
   STEP_DETAILS="${count} open nudge PRs"
   if ((count > 0)); then
@@ -121,38 +131,44 @@ verify_2_4() {
 }
 
 verify_2_5() {
-  local csv runs run_url state catalogs diff registry_ok=true
+  local csv runs run_url state catalogs diff registry_ok=true error
   csv=$(gh pr list --repo openshift-pipelines/operator \
     --head "actions/update/operator-update-images-${RELEASE_BRANCH}" --state merged --limit 1 \
     --json number,url,mergedAt)
   runs=$(gh run list --repo openshift-pipelines/operator --workflow=render-olm-catalog.yaml --limit 10 \
-    --json status,conclusion,createdAt,displayTitle,headBranch,url,event 2>/dev/null || printf '[]')
+    --json status,conclusion,createdAt,displayTitle,headBranch,url,event 2>"${REPORT_BASE}/.state/gh-error") || {
+    error=$(<"${REPORT_BASE}/.state/gh-error")
+    ocr_fail_with_error 'unable to query staging render runs' "${error}"
+    return $?
+  }
+  local run_created run_status
   run_url=$(jq -r --arg b "${RELEASE_BRANCH}" '[.[] | select(.event=="workflow_dispatch" and .status=="completed" and .conclusion=="success") | select((.displayTitle//"")|contains($b))][0].url // [.[] | select(.event=="workflow_dispatch" and .status=="completed" and .conclusion=="success")][0].url // empty' <<<"${runs}")
+  run_created=$(jq -r --arg url "${run_url}" '.[] | select(.url==$url) | .createdAt' <<<"${runs}" | head -1)
+  run_status=$(jq -r --arg url "${run_url}" '.[] | select(.url==$url) | "\(.status)/\(.conclusion)"' <<<"${runs}" | head -1)
   state=$(jq -r '.[0].number // empty' <<<"${csv}")
   if [[ -n "${state}" ]]; then
-    diff=$(gh pr diff --repo openshift-pipelines/operator "${state}" 2>/dev/null || true)
+    diff=$(gh pr diff --repo openshift-pipelines/operator "${state}" 2>"${REPORT_BASE}/.state/gh-error") || {
+      error=$(<"${REPORT_BASE}/.state/gh-error")
+      ocr_fail_with_error 'unable to inspect staging CSV PR diff' "${error}"
+      return $?
+    }
     grep -E '^\+.*image:.*(quay\.io|devel)' <<<"${diff}" >/dev/null && registry_ok=false
   fi
   catalogs=$(gh api "repos/openshift-pipelines/operator/commits?sha=${RELEASE_BRANCH}&per_page=10" \
-    --jq '[.[] | select(.commit.message | test("catalog|render|OCP catalog"; "i"))] | length' 2>/dev/null || printf '0')
-  STEP_DETAILS="CSV PR merged=${state:-no}; staging registries=${registry_ok}; staging render=$([[ -n "${run_url}" ]] && echo success || echo missing); catalog commits=${catalogs}"
+    --jq '[.[] | select(.commit.message | test("catalog|render|OCP catalog"; "i"))] | length' 2>"${REPORT_BASE}/.state/gh-error") || {
+    error=$(<"${REPORT_BASE}/.state/gh-error")
+    ocr_fail_with_error 'unable to verify catalog commits' "${error}"
+    return $?
+  }
+  STEP_DETAILS="CSV PR merged=${state:-no}; staging registries=${registry_ok}; staging render=${run_status:-missing} at $(ocr_abs_time "${run_created}"); catalog commits=${catalogs}"
   [[ -n "${state}" && "${registry_ok}" == true && -n "${run_url}" && ${catalogs} -gt 0 ]] || return "${OCR_RC_BLOCKED}"
   STEP_LINKS="operator [#${state}]($(jq -r '.[0].url' <<<"${csv}")), [render-olm-catalog](${run_url})"
-}
-
-snapshot_matches_or_automated_gap() {
-  local revision=$1 head=$2
-  [[ "${revision}" == "${head}" ]] && return 0
-  local commits
-  commits=$(gh api "repos/openshift-pipelines/operator/compare/${revision}...${head}" \
-    --jq '.commits[].commit.message | split("\n")[0]' 2>/dev/null || return 1)
-  [[ -n "${commits}" ]] || return 1
-  ! grep -Eivq '^(chore|build|Merge|\[bot:|One Click Release|.*catalog|.*nudge|.*image)' <<<"${commits}"
 }
 
 verify_2_6() {
   ocr_require_konflux || return $?
   local apps operator_head bundle snapshot rev stale='' checked=0 app
+  : >"${REPORT_BASE}/.state/fbc-snapshot-comparison.tsv"
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
   operator_head=$(git ls-remote https://github.com/openshift-pipelines/operator.git "refs/heads/${RELEASE_BRANCH}" | awk '{print $1}')
   bundle=$(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("bundle") and contains($mm)) | .metadata.name' <<<"${apps}" | head -1)
@@ -162,14 +178,16 @@ verify_2_6() {
     return "${OCR_RC_BLOCKED}"
   }
   rev=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.spec.components[0].source.git.revision}' 2>/dev/null)
-  snapshot_matches_or_automated_gap "${rev}" "${operator_head}" || stale+=" bundle"
+  ocr_operator_revision_is_generated "${rev}" "${operator_head}" || stale+=" bundle"
+  printf '%s\t%s\t%s\t%s\n' "${bundle}" "${snapshot}" "${rev}" "$([[ "${rev}" == "${operator_head}" ]] && echo CURRENT || echo 'GENERATED GAP/STALE')" >>"${REPORT_BASE}/.state/fbc-snapshot-comparison.tsv"
   while IFS= read -r app; do
     [[ -n "${app}" ]] || continue
     snapshot=$(ocr_latest_snapshot "${app}")
     [[ -z "${snapshot}" ]] && continue
     ((checked += 1))
     rev=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.spec.components[0].source.git.revision}' 2>/dev/null)
-    snapshot_matches_or_automated_gap "${rev}" "${operator_head}" || stale+=" ${app}"
+    ocr_operator_revision_is_generated "${rev}" "${operator_head}" || stale+=" ${app}"
+    printf '%s\t%s\t%s\t%s\n' "${app}" "${snapshot}" "${rev}" "$([[ "${rev}" == "${operator_head}" ]] && echo CURRENT || echo 'GENERATED GAP/STALE')" >>"${REPORT_BASE}/.state/fbc-snapshot-comparison.tsv"
   done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
   STEP_DETAILS="bundle snapshot present; ${checked} index snapshots checked"
   if [[ -n "${stale}" ]]; then
@@ -194,8 +212,9 @@ verify_2_8() {
     [[ -z "${snapshot}" ]] && continue
     ((total += 1))
     status=$(jq -r --arg mm "${MM_DASHED}" --arg snap "${snapshot}" '
-      [.items[] | select(.spec.snapshot==$snap and (.spec.releasePlan | contains($mm) and contains("stage")) and ((.spec.releasePlan | contains("fbc")) or (.spec.releasePlan | contains("index"))))
-       | [.status.conditions[]? | select(.type=="Released")][0].status][0] // ""' <<<"${releases}")
+      if any(.items[]; .spec.snapshot==$snap and (.spec.releasePlan | contains($mm) and contains("stage")) and
+        ((.spec.releasePlan | contains("fbc")) or (.spec.releasePlan | contains("index"))) and
+        any(.status.conditions[]?; .type=="Released" and .status=="True")) then "True" else "" end' <<<"${releases}")
     [[ "${status}" == True ]] && ((succeeded += 1))
   done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
   STEP_DETAILS="${succeeded}/${total} index stage releases succeeded"
@@ -220,6 +239,20 @@ ocr_verify_step() {
     2.1) verify_2_1 ;; 2.2) verify_2_2 ;; 2.3) verify_2_3 ;; 2.4) verify_2_4 ;;
     2.5) verify_2_5 ;; 2.6) verify_2_6 ;; 2.7) verify_2_7 ;; 2.8) verify_2_8 ;; 2.9) verify_2_9 ;;
   esac
+}
+
+ocr_report_stage_details() {
+  local file
+  file="${REPORT_BASE}/.state/core-snapshot-comparison.tsv"
+  if [[ -s "${file}" ]]; then
+    printf '\n## Core Component Revision Comparison\n\n| Repository | Snapshot Revision(s) | Branch HEAD | Status |\n|------------|----------------------|-------------|--------|\n'
+    while IFS=$'\t' read -r repo revisions head status; do printf '| %s | %s | %s | %s |\n' "${repo}" "${revisions}" "${head}" "${status}"; done <"${file}"
+  fi
+  file="${REPORT_BASE}/.state/fbc-snapshot-comparison.tsv"
+  if [[ -s "${file}" ]]; then
+    printf '\n## FBC Snapshot Comparison\n\n| Application | Snapshot | Revision | Status |\n|-------------|----------|----------|--------|\n'
+    while IFS=$'\t' read -r app snapshot revision status; do printf '| %s | %s | %s | %s |\n' "${app}" "${snapshot}" "${revision}" "${status}"; done <"${file}"
+  fi
 }
 
 ocr_verify_stage "${1:-}"

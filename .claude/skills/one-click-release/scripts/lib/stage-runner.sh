@@ -25,6 +25,9 @@ ocr_verify_stage() {
         ;;
       20)
         ocr_report_add "${step}" "${title}" 'SKIPPED' "${STEP_DETAILS:-credential unavailable}" "${STEP_LINKS:-—}"
+        OCR_BLOCKING_STEP=${step}
+        OCR_BLOCKING_DETAILS=${STEP_DETAILS:-credential unavailable}
+        blocked=true
         ;;
       10 | *)
         ocr_report_add "${step}" "${title}" 'ACTION NEEDED' "${STEP_DETAILS:-verification failed}" "${STEP_LINKS:-—}"
@@ -50,6 +53,25 @@ ocr_execute_stage() {
   if [[ "${STAGE_NAME}" == production-release ]]; then
     ocr_confirm_production || return 3
   fi
+
+  local predecessor verify_output verify_rc
+  case "${STAGE_NAME}" in
+    config) ;;
+    build) predecessor=config ;;
+    image-copy) predecessor='config build' ;;
+    production-release) predecessor='config build image-copy' ;;
+  esac
+  for predecessor in ${predecessor:-}; do
+    set +e
+    verify_output=$("${SCRIPTS_DIR}/${predecessor}/verify.sh" "${version}" 2>&1)
+    verify_rc=$?
+    set -e
+    if ((verify_rc != 0)); then
+      printf 'Refusing %s mutation: predecessor stage %s is incomplete. %s\n' \
+        "${STAGE_NAME}" "${predecessor}" "$(ocr_redact "${verify_output}" | tail -1)" >&2
+      return 2
+    fi
+  done
 
   set +e
   "${STAGE_DIR}/verify.sh" "${version}" >/dev/null

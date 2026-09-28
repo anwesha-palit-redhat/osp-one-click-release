@@ -7,6 +7,12 @@ OCR_RC_BLOCKED=10
 OCR_RC_SKIPPED=20
 OCR_KONFLUX_NS="tekton-ecosystem-tenant"
 
+ocr_cleanup_credentials() {
+  [[ -n "${OCR_KUBECONFIG_FILE:-}" ]] && rm -f "${OCR_KUBECONFIG_FILE}"
+  [[ -n "${OCR_CURL_CONFIG_FILE:-}" ]] && rm -f "${OCR_CURL_CONFIG_FILE}"
+  return 0
+}
+
 ocr_repo_root() {
   if [[ -n "${OCR_REPO_ROOT:-}" ]]; then
     printf '%s\n' "${OCR_REPO_ROOT}"
@@ -29,6 +35,18 @@ ocr_init_context() {
   local version=${1:-}
   ocr_validate_version "${version}" || return 1
 
+  local context_repo_root
+  context_repo_root=$(ocr_repo_root)
+
+  if [[ -f "${context_repo_root}/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "${context_repo_root}/.env"
+    set +a
+  fi
+
+  # Derived release context and the fixed namespace are authoritative. Rebuild
+  # them after loading credentials so .env cannot retarget an invocation.
   VERSION=${version}
   MAJOR_MINOR=${VERSION%.*}
   MM_DASHED=${MAJOR_MINOR//./-}
@@ -42,14 +60,7 @@ ocr_init_context() {
   fi
   KONFLUX_NS=${OCR_KONFLUX_NS}
   TZ_FMT='%Y-%m-%d %H:%M %Z'
-  REPO_ROOT=$(ocr_repo_root)
-
-  if [[ -f "${REPO_ROOT}/.env" ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    source "${REPO_ROOT}/.env"
-    set +a
-  fi
+  REPO_ROOT=${context_repo_root}
 
   local reports_root=${OCR_REPORT_ROOT:-${REPO_ROOT}/reports}
   REPORT_BASE="${reports_root}/${MAJOR_MINOR}/${VERSION}"
@@ -93,6 +104,19 @@ ocr_require_konflux() {
     return "${OCR_RC_SKIPPED}"
   fi
   ocr_require_command oc
+  if [[ -z "${OCR_KUBECONFIG_FILE:-}" ]]; then
+    OCR_KUBECONFIG_FILE=$(mktemp)
+    chmod 600 "${OCR_KUBECONFIG_FILE}"
+    local server=${KONFLUX_SERVER//\'/\'\'} token=${KONFLUX_TOKEN//\'/\'\'}
+    {
+      printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: konflux\n  cluster:\n'
+      printf "    server: '%s'\n    insecure-skip-tls-verify: true\n" "${server}"
+      printf "users:\n- name: release-user\n  user:\n    token: '%s'\n" "${token}"
+      printf 'contexts:\n- name: release\n  context:\n    cluster: konflux\n    user: release-user\n    namespace: %s\ncurrent-context: release\n' "${KONFLUX_NS}"
+    } >"${OCR_KUBECONFIG_FILE}"
+    export KUBECONFIG=${OCR_KUBECONFIG_FILE}
+    trap ocr_cleanup_credentials EXIT
+  fi
 }
 
 ocr_require_gitlab() {
@@ -104,29 +128,41 @@ ocr_require_gitlab() {
 }
 
 ocr_oc_get() {
-  oc get "$@" -n "${KONFLUX_NS}" \
-    --server="${KONFLUX_SERVER}" --token="${KONFLUX_TOKEN}" \
-    --insecure-skip-tls-verify
+  ocr_require_konflux || return $?
+  oc get "$@" -n "${KONFLUX_NS}"
 }
 
 ocr_oc_create() {
-  oc create "$@" \
-    --server="${KONFLUX_SERVER}" --token="${KONFLUX_TOKEN}" \
-    --insecure-skip-tls-verify
+  ocr_require_konflux || return $?
+  oc create "$@"
 }
 
 ocr_oc_wait_release() {
   local release_name=$1
+  ocr_require_konflux || return $?
   oc wait "release/${release_name}" -n "${KONFLUX_NS}" \
-    --server="${KONFLUX_SERVER}" --token="${KONFLUX_TOKEN}" \
-    --insecure-skip-tls-verify \
     --for=condition=Released --timeout=300s 2>&1 || true
 }
 
 ocr_gitlab_get() {
   local url=$1
-  curl --silent --show-error --fail \
-    --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "${url}"
+  if [[ -z "${OCR_CURL_CONFIG_FILE:-}" ]]; then
+    OCR_CURL_CONFIG_FILE=$(mktemp)
+    chmod 600 "${OCR_CURL_CONFIG_FILE}"
+    local token=${GITLAB_TOKEN//\\/\\\\}
+    token=${token//\"/\\\"}
+    printf 'silent\nshow-error\nfail\nheader = "PRIVATE-TOKEN: %s"\n' "${token}" >"${OCR_CURL_CONFIG_FILE}"
+    trap ocr_cleanup_credentials EXIT
+  fi
+  curl --config "${OCR_CURL_CONFIG_FILE}" "${url}"
+}
+
+ocr_fail_with_error() {
+  local message=$1 error=${2:-}
+  error=$(ocr_redact "${error}")
+  STEP_DETAILS=${message}
+  [[ -n "${error}" ]] && STEP_DETAILS+="; error: ${error}"
+  return "${OCR_RC_BLOCKED}"
 }
 
 ocr_abs_time() {
@@ -141,11 +177,9 @@ ocr_abs_time() {
 ocr_confirm_action() {
   local stage=$1 step=$2
   local expected="execute ${VERSION} ${stage} ${step}"
-  local answer=${OCR_ACTION_APPROVAL:-}
-  if [[ -z "${answer}" ]]; then
-    printf 'Explicit approval required. Type exactly: %s\n> ' "${expected}" >&2
-    IFS= read -r answer
-  fi
+  local answer=''
+  printf 'Explicit approval required. Type exactly: %s\n> ' "${expected}" >&2
+  IFS= read -r answer || true
   [[ "${answer}" == "${expected}" ]] || {
     printf 'Execution approval not granted; no mutation was run.\n' >&2
     return 1
@@ -154,17 +188,77 @@ ocr_confirm_action() {
 
 ocr_confirm_production() {
   local expected="start production-release ${VERSION}"
-  local answer=${OCR_PRODUCTION_APPROVAL:-}
-  if [[ -z "${answer}" ]]; then
-    printf 'Production release has a separate gate. Type exactly: %s\n> ' "${expected}" >&2
-    IFS= read -r answer
-  fi
+  local answer=''
+  printf 'Production release has a separate gate. Type exactly: %s\n> ' "${expected}" >&2
+  IFS= read -r answer || true
   [[ "${answer}" == "${expected}" ]] || {
     printf 'Production approval not granted; production-release did not start.\n' >&2
     return 1
   }
-  OCR_PRODUCTION_APPROVAL=${expected}
-  export OCR_PRODUCTION_APPROVAL
+}
+
+ocr_mutation_marker() {
+  local key=${1//[^a-zA-Z0-9_.-]/_}
+  printf '%s/.state/mutation-%s' "${REPORT_BASE}" "${key}"
+}
+
+ocr_mutation_done() { [[ -f "$(ocr_mutation_marker "$1")" ]]; }
+
+ocr_mark_mutation() {
+  local marker temp
+  marker=$(ocr_mutation_marker "$1")
+  temp="${marker}.tmp.$$"
+  printf '%s\n' "$(date +"${TZ_FMT}")" >"${temp}"
+  mv "${temp}" "${marker}"
+}
+
+ocr_workflow_state_file() { printf '%s/.state/workflow-%s.state' "${REPORT_BASE}" "$1"; }
+
+ocr_record_workflow_run() {
+  local key=$1 workflow=$2 environment=$3 branch=$4 id=$5 created=$6
+  local path temp
+  path=$(ocr_workflow_state_file "${key}")
+  temp="${path}.tmp.$$"
+  {
+    printf 'WORKFLOW=%q\n' "${workflow}"
+    printf 'ENVIRONMENT=%q\n' "${environment}"
+    printf 'BRANCH=%q\n' "${branch}"
+    printf 'RUN_ID=%q\n' "${id}"
+    printf 'CREATED_AT=%q\n' "${created}"
+  } >"${temp}"
+  mv "${temp}" "${path}"
+}
+
+ocr_load_workflow_run() {
+  local key=$1 path
+  path=$(ocr_workflow_state_file "${key}")
+  [[ -f "${path}" ]] || return 1
+  WORKFLOW='' ENVIRONMENT='' BRANCH='' RUN_ID='' CREATED_AT=''
+  # shellcheck disable=SC1090
+  source "${path}"
+  [[ -n "${WORKFLOW}" && -n "${ENVIRONMENT}" && -n "${BRANCH}" && "${RUN_ID}" =~ ^[0-9]+$ && -n "${CREATED_AT}" ]]
+}
+
+ocr_workflow_provenance_matches() {
+  local key=$1 workflow=$2 environment=$3 branch=$4
+  ocr_load_workflow_run "${key}" || return 1
+  [[ "${WORKFLOW}" == "${workflow}" && "${ENVIRONMENT}" == "${environment}" && "${BRANCH}" == "${branch}" ]]
+}
+
+ocr_workflow_log_has_environment() {
+  local run_id=$1 expected=$2 log
+  log=$(gh run view --repo openshift-pipelines/operator "${run_id}" --log 2>/dev/null) || return 1
+  grep -Eiq "(^|[^[:alnum:]_])(environment|ENVIRONMENT)[=:][[:space:]]*${expected}([^[:alnum:]_-]|$)" <<<"${log}"
+}
+
+ocr_operator_revision_is_generated() {
+  local revision=$1 head=$2 compare actors_ok files_ok
+  [[ "${revision}" == "${head}" ]] && return 0
+  compare=$(gh api "repos/openshift-pipelines/operator/compare/${revision}...${head}" 2>/dev/null) || return 1
+  actors_ok=$(jq -e '[.commits[] | (.author.login // "")] | length > 0 and all(.[]; . == "github-actions[bot]" or . == "openshift-pipelines-bot" or . == "red-hat-konflux[bot]")' <<<"${compare}" 2>/dev/null) || return 1
+  files_ok=$(jq -e '[.files[].filename] | length > 0 and all(.[];
+    test("^(\\.konflux/olm-catalog/(bundle|index)/\\.placeholder|olm/.*\\.(json|yaml|yml)|bundle/.*\\.(yaml|yml))$"))' <<<"${compare}" 2>/dev/null) || return 1
+  [[ "${actors_ok}" == true && "${files_ok}" == true ]]
 }
 
 ocr_normalize_stage() {

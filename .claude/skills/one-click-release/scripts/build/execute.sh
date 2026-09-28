@@ -56,7 +56,10 @@ process_pr_urls() {
 execute_2_1() {
   local prs
   prs=$(gh search prs --owner openshift-pipelines --base "${RELEASE_BRANCH}" --state open \
-    --json url 'label:hack,upstream,automated' 2>/dev/null || printf '[]')
+    --json url 'label:hack,upstream,automated') || {
+    printf 'Unable to query release PRs; refusing to treat the result as empty.\n' >&2
+    return 2
+  }
   process_pr_urls < <(jq -r '.[].url' <<<"${prs}")
 }
 
@@ -100,7 +103,12 @@ execute_2_2() {
     head=$(git ls-remote "https://github.com/${repo}.git" "refs/heads/${RELEASE_BRANCH}" | awk '{print $1}')
     if [[ "${revs}" == *,* || "${revs}" != "${head}" ]]; then
       ((stale += 1))
+      if ocr_mutation_done "core-rebuild-${repo}"; then
+        printf 'Rebuild for %s was already pushed; waiting for a current snapshot.\n' "${repo}"
+        continue
+      fi
       push_placeholder "${repo}" .konflux/patches/.placeholder 'One Click Release: build all konflux components'
+      ocr_mark_mutation "core-rebuild-${repo}"
     fi
   done < <(core_snapshot_rows)
   ((stale > 0)) || printf 'No stale repositories found on re-check.\n'
@@ -131,7 +139,8 @@ existing_release_for_snapshot() {
   local rp=$1 snapshot=$2
   ocr_oc_get releases -o json | jq -r --arg rp "${rp}" --arg snapshot "${snapshot}" '
     [.items[] | select(.spec.releasePlan==$rp and .spec.snapshot==$snapshot)
-      | {name:.metadata.name,status:([.status.conditions[]? | select(.type=="Released")][0].status // "Unknown")}][-1]
+      | {name:.metadata.name,status:([.status.conditions[]? | select(.type=="Released")][0].status // "Unknown"),created:(.metadata.creationTimestamp // "")}
+      | sort_by(.created)][-1]
       | if . == null then empty else "\(.name)|\(.status)" end'
 }
 
@@ -157,8 +166,10 @@ create_stage_release() {
   if [[ -n "${existing}" ]]; then
     existing_name=${existing%%|*}
     existing_status=${existing#*|}
-    printf 'Release %s already exists for this snapshot (Released=%s); not creating a duplicate.\n' "${existing_name}" "${existing_status}" >&2
-    [[ "${existing_status}" == True ]] && return 0 || return 2
+    printf 'Release %s already exists for this snapshot (Released=%s).\n' "${existing_name}" "${existing_status}" >&2
+    [[ "${existing_status}" == True ]] && return 0
+    [[ "${existing_status}" == False ]] || return 2
+    printf 'The latest attempt failed; creating the supported retry Release CR.\n' >&2
   fi
   path="${REPORT_BASE}/manifest/stage/release-${VERSION}-${kind}-stage.yaml"
   ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
@@ -216,7 +227,10 @@ execute_2_4() {
   local prs
   local -a ready_urls=()
   prs=$(gh search prs --owner openshift-pipelines --base "${RELEASE_BRANCH}" --state open \
-    --json url 'label:konflux-nudge' 2>/dev/null || printf '[]')
+    --json url 'label:konflux-nudge') || {
+    printf 'Unable to query nudge PRs; refusing to treat the result as empty.\n' >&2
+    return 2
+  }
   local url data state
   while IFS= read -r url; do
     data=$(gh pr view "${url}" --json mergeable,mergeStateStatus,statusCheckRollup)
@@ -265,7 +279,10 @@ execute_2_5() {
   merged_pr=$(gh pr list --repo openshift-pipelines/operator --head "actions/update/operator-update-images-${RELEASE_BRANCH}" \
     --state merged --limit 1 --json number --jq '.[0].number // empty')
   if [[ -n "${merged_pr}" ]]; then
-    diff=$(gh pr diff --repo openshift-pipelines/operator "${merged_pr}" 2>/dev/null || true)
+    diff=$(gh pr diff --repo openshift-pipelines/operator "${merged_pr}") || {
+      printf 'Unable to inspect merged staging CSV PR; refusing to continue.\n' >&2
+      return 2
+    }
     if grep -E '^\+.*image:.*(quay\.io|devel)' <<<"${diff}" >/dev/null; then
       merged_pr=''
     fi
@@ -303,7 +320,7 @@ execute_2_5() {
 
 execute_2_6() {
   ocr_require_konflux || return 2
-  local apps head bundle snapshot rev stale_bundle=false stale_index=false app commits
+  local apps head bundle snapshot rev stale_bundle=false stale_index=false app
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
   head=$(git ls-remote https://github.com/openshift-pipelines/operator.git "refs/heads/${RELEASE_BRANCH}" | awk '{print $1}')
   bundle=$(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("bundle") and contains($mm)) | .metadata.name' <<<"${apps}" | head -1)
@@ -312,10 +329,7 @@ execute_2_6() {
     stale_bundle=true
   else
     rev=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.spec.components[0].source.git.revision}')
-    if [[ "${rev}" != "${head}" ]]; then
-      commits=$(gh api "repos/openshift-pipelines/operator/compare/${rev}...${head}" --jq '.commits[].commit.message | split("\n")[0]' 2>/dev/null || true)
-      [[ -n "${commits}" ]] && ! grep -Eivq '^(chore|build|Merge|\[bot:|One Click Release|.*catalog|.*nudge|.*image)' <<<"${commits}" || stale_bundle=true
-    fi
+    ocr_operator_revision_is_generated "${rev}" "${head}" || stale_bundle=true
   fi
   while IFS= read -r app; do
     snapshot=$(ocr_latest_snapshot "${app}")
@@ -323,8 +337,18 @@ execute_2_6() {
     rev=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.spec.components[0].source.git.revision}')
     [[ "${rev}" == "${head}" ]] || stale_index=true
   done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("index") and contains($mm)) | .metadata.name' <<<"${apps}")
-  [[ "${stale_bundle}" == false ]] || push_placeholder openshift-pipelines/operator .konflux/olm-catalog/bundle/.placeholder 'One Click Release: rebuild bundle'
-  [[ "${stale_index}" == false ]] || push_placeholder openshift-pipelines/operator .konflux/olm-catalog/index/.placeholder 'One Click Release: rebuild index images'
+  if [[ "${stale_bundle}" == true ]]; then
+    if ocr_mutation_done fbc-bundle-rebuild; then printf 'Bundle rebuild already pushed; waiting for its snapshot.\n'; else
+      push_placeholder openshift-pipelines/operator .konflux/olm-catalog/bundle/.placeholder 'One Click Release: rebuild bundle'
+      ocr_mark_mutation fbc-bundle-rebuild
+    fi
+  fi
+  if [[ "${stale_index}" == true ]]; then
+    if ocr_mutation_done fbc-index-rebuild; then printf 'Index rebuild already pushed; waiting for snapshots.\n'; else
+      push_placeholder openshift-pipelines/operator .konflux/olm-catalog/index/.placeholder 'One Click Release: rebuild index images'
+      ocr_mark_mutation fbc-index-rebuild
+    fi
+  fi
   if [[ "${stale_bundle}" == false && "${stale_index}" == false ]]; then
     printf 'No stale bundle or index snapshots found on re-check.\n'
   fi
@@ -361,10 +385,14 @@ execute_2_8() {
       existing_name=${existing%%|*}
       existing_status=${existing#*|}
       printf 'Release %s already exists for %s (Released=%s); skipping duplicate creation.\n' "${existing_name}" "${app}" "${existing_status}"
-      if [[ "${existing_status}" != False ]]; then
+      if [[ "${existing_status}" == True ]]; then
         ((made += 1))
         continue
       fi
+      [[ "${existing_status}" == False ]] || {
+        printf 'Existing release %s is still pending; refusing a duplicate.\n' "${existing_name}" >&2
+        return 2
+      }
     fi
     ocp=${app#openshift-pipelines-index-}
     ocp=${ocp%-"${MM_DASHED}"}
