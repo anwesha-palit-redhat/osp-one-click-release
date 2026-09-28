@@ -644,7 +644,7 @@ Report a table:
 
 **Collect links:** Report the render-olm-catalog workflow run URL and index snapshot statuses.
 
-**Expected when DONE:** A `render-olm-catalog` `workflow_dispatch` run (not an auto-triggered push run) completed successfully with production environment after the bundle release. All index snapshots with non-empty config are CURRENT and built AFTER the production catalog commit.
+**Expected when DONE:** A `render-olm-catalog` `workflow_dispatch` run (not an auto-triggered push run) completed successfully with production environment after the bundle release. The exact generated catalog PR is recorded, contains only `registry.redhat.io/openshift-pipelines/` digest references, and is merged after that run. All index snapshots with non-empty config descend from that merge, were built afterward, and retain `olm/release-stage.txt=production` at their source revision.
 
 ### If not done — Execute (requires approval)
 
@@ -671,7 +671,7 @@ gh workflow run render-olm-catalog.yaml \
   -f environment=production
 ```
 
-The production run overwrites the devel catalog JSONs with production registry references and triggers fresh FBC index builds. Wait for this run to complete before checking index snapshots — index images built from the earlier devel catalogs will be superseded.
+The production run overwrites the generated branch with production registry references. The executable records the exact generated PR head, validates and merges that PR, and then binds fresh FBC snapshots to its merge commit. Wait for the PR and snapshots to complete — index images built from earlier devel catalogs are never accepted as production evidence.
 
 If index snapshots are stale after the production catalog render, push a placeholder to trigger index rebuilds:
 ```bash
