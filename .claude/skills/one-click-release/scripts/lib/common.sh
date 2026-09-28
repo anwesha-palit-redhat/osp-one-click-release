@@ -361,9 +361,9 @@ ocr_operator_revision_is_generated() {
   local revision=$1 head=$2 compare actors_ok files_ok
   [[ "${revision}" == "${head}" ]] && return 0
   compare=$(gh api "repos/openshift-pipelines/operator/compare/${revision}...${head}" 2>/dev/null) || return 1
-  actors_ok=$(jq -e '[.commits[] | (.author.login // "")] | length > 0 and all(.[]; . == "github-actions[bot]" or . == "openshift-pipelines-bot" or . == "red-hat-konflux[bot]" or . == "red-hat-konflux-kflux-prd-rh02[bot]" or startswith("red-hat-konflux-"))' <<<"${compare}" 2>/dev/null) || return 1
+  actors_ok=$(jq -e '[.commits[] | (.author.login // "")] | length > 0 and all(.[]; . == "github-actions[bot]" or . == "openshift-pipelines-bot" or . == "red-hat-konflux[bot]")' <<<"${compare}" 2>/dev/null) || return 1
   files_ok=$(jq -e '[.files[].filename] | length > 0 and all(.[];
-    test("^(\\.konflux/olm-catalog/|olm/|bundle[/.]|nightly-bundle\\.)"))' <<<"${compare}" 2>/dev/null) || return 1
+    test("^(\\.konflux/olm-catalog/(bundle|index)/\\.placeholder|olm/.*\\.(json|yaml|yml)|bundle/.*\\.(yaml|yml))$"))' <<<"${compare}" 2>/dev/null) || return 1
   [[ "${actors_ok}" == true && "${files_ok}" == true ]]
 }
 

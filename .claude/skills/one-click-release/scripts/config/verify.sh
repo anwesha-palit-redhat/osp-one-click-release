@@ -14,7 +14,7 @@ source "${SCRIPTS_DIR}/lib/stage-runner.sh"
 STAGE_NAME=config
 STAGE_REPORT_TITLE='Config Stage Report'
 STAGE_REPORT_DIR=config
-STAGE_STEPS=(1.1 1.2 1.3 1.4 1.5 1.6 1.7 1.8a 1.8b 1.9 1.10 1.11 1.12)
+STAGE_STEPS=(1.1 1.2 1.3 1.4 1.5 1.6 1.7 1.8 1.9 1.10 1.11 1.12)
 
 ocr_step_title() {
   case "$1" in
@@ -25,8 +25,7 @@ ocr_step_title() {
     1.5) printf '%s' 'RPA in konflux-release-data' ;;
     1.6) printf '%s' 'Pyxis config' ;;
     1.7) printf '%s' 'Operator project.yaml version' ;;
-    1.8a) printf '%s' 'OPC component update PRs' ;;
-    1.8b) printf '%s' 'OPC version.json' ;;
+    1.8) printf '%s' 'OPC version.json' ;;
     1.9) printf '%s' 'p12n-opc sync' ;;
     1.10) printf '%s' 'serve-tkn-cli submodules' ;;
     1.11) printf '%s' 'CLI product version config' ;;
@@ -290,29 +289,10 @@ latest_in_series() {
   printf '%s\n%s\n' "${releases}" "${tags}" | sed '/^$/d' | sort -Vu | tail -1
 }
 
-classify_pr_status() {
-  local url=$1 data mergeable state failures pending
-  data=$(gh pr view "${url}" --json mergeable,mergeStateStatus,statusCheckRollup)
-  mergeable=$(jq -r '.mergeable' <<<"${data}")
-  state=$(jq -r '.mergeStateStatus' <<<"${data}")
-  failures=$(jq '[.statusCheckRollup[]? | select((.conclusion // "") != "" and (.conclusion | IN("SUCCESS","NEUTRAL","SKIPPED") | not))] | length' <<<"${data}")
-  pending=$(jq '[.statusCheckRollup[]? | select((.status // "") != "COMPLETED")] | length' <<<"${data}")
-  if [[ "${mergeable}" == CONFLICTING || "${state}" == DIRTY ]]; then
-    printf 'CONFLICT'
-  elif [[ "${state}" == BEHIND ]]; then
-    printf 'BEHIND'
-  elif ((failures > 0)); then
-    printf 'CI_FAILING'
-  elif ((pending > 0)); then
-    printf 'CI_PENDING'
-  else
-    printf 'READY_TO_MERGE'
-  fi
-}
-
-verify_1_8a() {
-  local open count number url pr_status all_ready=true summary=''
-  : >"${REPORT_BASE}/.state/opc-component-prs.tsv"
+verify_1_8() {
+  local open versions cfg count mismatches='' component key repo branch series current latest cmp
+  : >"${REPORT_BASE}/.state/opc-version-mismatches"
+  : >"${REPORT_BASE}/.state/opc-version-comparison.tsv"
   open=$(gh pr list --repo openshift-pipelines/opc --base "${RELEASE_BRANCH}" --state open \
     --search 'Update component versions in:title' --json number,url,mergeable,mergeStateStatus)
   local opc_bump
@@ -320,29 +300,11 @@ verify_1_8a() {
     --json number,url,mergeable,mergeStateStatus)
   open=$(jq -s 'add | unique_by(.number)' <(printf '%s\n' "${open}") <(printf '%s\n' "${opc_bump}"))
   count=$(jq length <<<"${open}")
-  if ((count == 0)); then
-    STEP_DETAILS='no open component update PRs'
-    return 0
+  if ((count > 0)); then
+    STEP_DETAILS="${count} component update PR(s) still open"
+    STEP_LINKS=$(jq -r 'map("opc [#\(.number)](\(.url))") | join(", ")' <<<"${open}")
+    return "${OCR_RC_BLOCKED}"
   fi
-  STEP_LINKS=$(jq -r 'map("opc [#\(.number)](\(.url))") | join(", ")' <<<"${open}")
-  while IFS= read -r url; do
-    number=$(jq -r --arg u "${url}" '.[] | select(.url==$u) | .number' <<<"${open}")
-    pr_status=$(classify_pr_status "${url}")
-    printf '%s\t%s\t%s\n' "${number}" "${url}" "${pr_status}" >>"${REPORT_BASE}/.state/opc-component-prs.tsv"
-    summary+=" #${number}:${pr_status}"
-    [[ "${pr_status}" == READY_TO_MERGE ]] || all_ready=false
-  done < <(jq -r '.[].url' <<<"${open}")
-  STEP_DETAILS="${count} open PR(s):${summary}"
-  if [[ "${all_ready}" == true ]]; then
-    return 0
-  fi
-  return "${OCR_RC_BLOCKED}"
-}
-
-verify_1_8b() {
-  local versions cfg mismatches='' component key repo branch series current latest cmp
-  : >"${REPORT_BASE}/.state/opc-version-mismatches"
-  : >"${REPORT_BASE}/.state/opc-version-comparison.tsv"
   versions=$(gh_content "repos/openshift-pipelines/opc/contents/pkg/version.json?ref=${RELEASE_BRANCH}") || {
     STEP_DETAILS='unable to fetch OPC version.json'
     return "${OCR_RC_BLOCKED}"
@@ -351,56 +313,26 @@ verify_1_8b() {
   while IFS='|' read -r component key repo; do
     current=$(jq -r --arg k "${component}" '.[$k] // empty' <<<"${versions}" | sed 's/^v//')
     branch=$(release_branch_value "${cfg}" "${key}")
-    # Classify upstream branch pattern and resolve expected version
-    if [[ -z "${branch}" ]]; then
-      # Component not in hack config; fall back to current version series
-      if [[ -n "${current}" && "${current}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    [[ -n "${branch}" ]] || {
+      if [[ "${component}" == assist && "${current}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         series=${current%.*}
-        latest=$(latest_in_series "${repo}" "${series}")
       else
         mismatches+=" ${component}:UNKNOWN"
-        printf '%s\t%s\t%s\t%s\t%s\n' "${component}" "—" "${current:-missing}" "unknown" "UNKNOWN" >>"${REPORT_BASE}/.state/opc-version-comparison.tsv"
         continue
       fi
-    elif [[ "${branch}" =~ ^release-v([0-9]+\.[0-9]+)\.x$ ]]; then
-      # Wildcard: release-vX.Y.x — find latest patch in the X.Y series
-      series=${BASH_REMATCH[1]}
-      latest=$(latest_in_series "${repo}" "${series}")
-    elif [[ "${branch}" =~ ^release-v([0-9]+(\.[0-9]+)+)$ ]]; then
-      # Pinned: release-vX.Y.Z — expected version is exactly X.Y.Z
-      latest=${BASH_REMATCH[1]}
-      series="pinned:${latest}"
-    elif [[ "${branch}" == "main" || "${branch}" == "master" ]]; then
-      # Unversioned: find latest release or tag in the repo
-      series="${branch}"
-      latest=$(gh api "repos/${repo}/releases/latest" --jq '.tag_name' 2>/dev/null | sed 's/^v//' || true)
-      [[ -n "${latest}" ]] || latest=$(gh api "repos/${repo}/releases?per_page=1" --jq '.[0].tag_name // empty' 2>/dev/null | sed 's/^v//' || true)
-      [[ -n "${latest}" ]] || latest=${current}
-    else
-      # Unknown pattern; try generic series extraction
+    }
+    if [[ -n "${branch}" ]]; then
       series=${branch#release-v}
       series=${series%.x}
-      latest=$(latest_in_series "${repo}" "${series}")
     fi
-    # Determine version status
-    local status
+    latest=$(latest_in_series "${repo}" "${series}")
+    printf '%s\t%s\t%s\t%s\t%s\n' "${component}" "${series}" "${current:-missing}" "${latest:-unknown}" "$([[ -n "${current}" && "${current}" == "${latest}" ]] && echo CURRENT || echo CHECK)" >>"${REPORT_BASE}/.state/opc-version-comparison.tsv"
     if [[ -z "${current}" || -z "${latest}" ]]; then
-      status='UNKNOWN'
-    elif [[ "${current}" == "${latest}" ]]; then
-      status='CURRENT'
-    else
+      mismatches+=" ${component}:UNKNOWN"
+    elif [[ "${current}" != "${latest}" ]]; then
       cmp=$(printf '%s\n%s\n' "${current}" "${latest}" | sort -V | tail -1)
-      if [[ "${cmp}" == "${current}" ]]; then
-        status='AHEAD'
-      else
-        status='OUTDATED'
-      fi
+      [[ "${cmp}" == "${current}" ]] || mismatches+=" ${component}:${current}->${latest}"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\n' "${component}" "${series}" "${current:-missing}" "${latest:-unknown}" "${status}" >>"${REPORT_BASE}/.state/opc-version-comparison.tsv"
-    case "${status}" in
-      UNKNOWN) mismatches+=" ${component}:UNKNOWN" ;;
-      OUTDATED) mismatches+=" ${component}:${current}->${latest}" ;;
-    esac
   done <<'EOF'
 pac|pipelines-as-code|openshift-pipelines/pipelines-as-code
 tkn|tektoncd-cli|tektoncd/cli
@@ -408,14 +340,8 @@ results|tektoncd-results|tektoncd/results
 manualapprovalgate|manual-approval-gate|openshift-pipelines/manual-approval-gate
 assist|tekton-assist|openshift-pipelines/tekton-assist
 EOF
-  # Check opc field matches VERSION
   current=$(jq -r '.opc // empty' <<<"${versions}" | sed 's/^v//')
-  if [[ "${current}" != "${VERSION}" ]]; then
-    mismatches+=" opc:${current:-missing}->${VERSION}"
-    printf '%s\t%s\t%s\t%s\t%s\n' "opc" "self" "${current:-missing}" "${VERSION}" "OUTDATED" >>"${REPORT_BASE}/.state/opc-version-comparison.tsv"
-  else
-    printf '%s\t%s\t%s\t%s\t%s\n' "opc" "self" "${current}" "${VERSION}" "CURRENT" >>"${REPORT_BASE}/.state/opc-version-comparison.tsv"
-  fi
+  [[ "${current}" == "${VERSION}" ]] || mismatches+=" opc:${current:-missing}->${VERSION}"
   STEP_DETAILS='all OPC component versions current'
   if [[ -n "${mismatches}" ]]; then
     printf '%s\n' "${mismatches}" >"${REPORT_BASE}/.state/opc-version-mismatches"
@@ -425,35 +351,18 @@ EOF
 }
 
 verify_1_9() {
-  local opc p12n prs number url opc_gomod p12n_gomod mismatches=''
+  local opc p12n prs number url
   opc=$(gh_content "repos/openshift-pipelines/opc/contents/pkg/version.json?ref=${RELEASE_BRANCH}") || return "${OCR_RC_BLOCKED}"
   p12n=$(gh_content "repos/openshift-pipelines/p12n-opc/contents/upstream/pkg/version.json?ref=${RELEASE_BRANCH}") || return "${OCR_RC_BLOCKED}"
   prs=$(gh pr list --repo openshift-pipelines/p12n-opc --base "${RELEASE_BRANCH}" --state all --limit 5 --json number,url 2>/dev/null || printf '[]')
   number=$(jq -r '.[0].number // empty' <<<"${prs}")
   url=$(jq -r '.[0].url // empty' <<<"${prs}")
   [[ -n "${number}" ]] && STEP_LINKS="p12n-opc [#${number}](${url})"
-
-  # Compare version.json
+  STEP_DETAILS='OPC and p12n-opc version.json match'
   if [[ "$(jq -S . <<<"${opc}")" != "$(jq -S . <<<"${p12n}")" ]]; then
-    mismatches+=' version.json'
-  fi
-
-  # Compare go.mod to detect dependency changes not reflected in version.json
-  opc_gomod=$(gh_content "repos/openshift-pipelines/opc/contents/go.mod?ref=${RELEASE_BRANCH}") || true
-  p12n_gomod=$(gh_content "repos/openshift-pipelines/p12n-opc/contents/upstream/go.mod?ref=${RELEASE_BRANCH}") || true
-  if [[ -n "${opc_gomod}" && -n "${p12n_gomod}" ]]; then
-    if [[ "${opc_gomod}" != "${p12n_gomod}" ]]; then
-      mismatches+=' go.mod'
-    fi
-  elif [[ -n "${opc_gomod}" || -n "${p12n_gomod}" ]]; then
-    mismatches+=' go.mod(missing-in-one-repo)'
-  fi
-
-  if [[ -n "${mismatches}" ]]; then
-    STEP_DETAILS="p12n-opc upstream/ differs from OPC:${mismatches}"
+    STEP_DETAILS='p12n-opc upstream/pkg/version.json differs from OPC'
     return "${OCR_RC_BLOCKED}"
   fi
-  STEP_DETAILS='OPC and p12n-opc version.json and go.mod match'
 }
 
 verify_1_10() {
@@ -505,53 +414,22 @@ verify_1_11() {
 
 verify_1_12() {
   ocr_require_gitlab || return $?
-  local base rpa rp_sub auto rpa_count rp_count auto_count
-  local mm_dot="${MAJOR_MINOR}"  # e.g. 1.23
-
+  local base rpa rp auto rpa_count rp_count auto_count
   base="${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data/repository/tree"
-
-  # RPA check — flat files, works as before
   rpa=$(ocr_gitlab_get "${base}?path=config/kflux-prd-rh02.0fk9.p1/product/ReleasePlanAdmission/tekton-ecosystem&ref=main&per_page=100") || return "${OCR_RC_BLOCKED}"
-  rpa_count=$(jq --arg mm "${MM_DASHED}" '[.[] | select(.name | contains($mm) and contains("cdn"))] | length' <<<"${rpa}")
-
-  # Tenant RP check — look inside the version subdirectory for multi-doc YAMLs
-  # containing CDN ReleasePlan documents
-  local tenant_subdir="tenants-config/cluster/kflux-prd-rh02/tenants/tekton-ecosystem-tenant/openshift-pipelines-${mm_dot}"
-  local encoded_subdir
-  encoded_subdir=$(printf '%s' "${tenant_subdir}" | sed 's|/|%2F|g')
-
-  rp_count=0
-  rp_sub=$(ocr_gitlab_get "${base}?path=$(printf '%s' "${tenant_subdir}" | jq -sRr @uri)&ref=main&per_page=100" 2>/dev/null) || rp_sub="[]"
-
-  # For each YAML file in the tenant subdirectory, fetch its content
-  # and count YAML documents whose metadata.name contains "cdn"
-  local rp_file rp_file_path rp_content cdn_docs
-  while IFS= read -r rp_file; do
-    [[ -n "${rp_file}" ]] || continue
-    rp_file_path="${tenant_subdir}/${rp_file}"
-    local encoded_path
-    encoded_path=$(printf '%s' "${rp_file_path}" | sed 's|/|%2F|g')
-    rp_content=$(ocr_gitlab_get \
-      "${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data/repository/files/${encoded_path}/raw?ref=main" \
-      2>/dev/null) || continue
-    # Count YAML documents with "cdn" in metadata.name
-    cdn_docs=$(grep -c "name:.*cdn" <<<"${rp_content}" || true)
-    rp_count=$((rp_count + cdn_docs))
-  done < <(jq -r '.[] | select(.type == "blob" and (.name | endswith(".yaml"))) | .name' <<<"${rp_sub}")
-
-  # Auto-generated check — keep as-is (flat directory)
+  rp=$(ocr_gitlab_get "${base}?path=tenants-config/cluster/kflux-prd-rh02/tenants/tekton-ecosystem-tenant&ref=main&per_page=100") || return "${OCR_RC_BLOCKED}"
   auto=$(ocr_gitlab_get "${base}?path=tenants-config/auto-generated/cluster/kflux-prd-rh02/tenants/tekton-ecosystem-tenant&ref=main&per_page=100") || return "${OCR_RC_BLOCKED}"
+  rpa_count=$(jq --arg mm "${MM_DASHED}" '[.[] | select(.name | contains($mm) and contains("cdn"))] | length' <<<"${rpa}")
+  rp_count=$(jq --arg mm "${MM_DASHED}" '[.[] | select(.name | contains($mm) and contains("cdn"))] | length' <<<"${rp}")
   auto_count=$(jq --arg mm "${MM_DASHED}" '[.[] | select(.name | contains($mm) and contains("cdn"))] | length' <<<"${auto}")
-
   STEP_DETAILS="CDN RPAs: ${rpa_count}; tenant RPs: ${rp_count}; auto-generated RPs: ${auto_count}"
-  ((rpa_count >= 2 && rp_count >= 1)) || return "${OCR_RC_BLOCKED}"
+  ((rpa_count >= 2 && rp_count >= 1 && auto_count >= 1)) || return "${OCR_RC_BLOCKED}"
 }
 
 ocr_verify_step() {
   case "$1" in
     1.1) verify_1_1 ;; 1.2) verify_1_2 ;; 1.3) verify_1_3 ;; 1.4) verify_1_4 ;;
-    1.5) verify_1_5 ;; 1.6) verify_1_6 ;; 1.7) verify_1_7 ;;
-    1.8a) verify_1_8a ;; 1.8b) verify_1_8b ;;
+    1.5) verify_1_5 ;; 1.6) verify_1_6 ;; 1.7) verify_1_7 ;; 1.8) verify_1_8 ;;
     1.9) verify_1_9 ;; 1.10) verify_1_10 ;; 1.11) verify_1_11 ;; 1.12) verify_1_12 ;;
   esac
 }
@@ -562,11 +440,6 @@ ocr_report_stage_details() {
   if [[ -s "${file}" ]]; then
     printf '\n## Application and Component Parity\n\n| Application | Hack Repo Components | Cluster Components | Status |\n|-------------|----------------------|--------------------|--------|\n'
     while IFS=$'\t' read -r app expected actual status; do printf '| %s | %s | %s | %s |\n' "${app}" "${expected:-—}" "${actual:-—}" "${status}"; done <"${file}"
-  fi
-  file="${REPORT_BASE}/.state/opc-component-prs.tsv"
-  if [[ -s "${file}" ]]; then
-    printf '\n## Component Update PRs\n\n| PR | URL | Status |\n|----|-----|--------|\n'
-    while IFS=$'\t' read -r number url status; do printf '| #%s | %s | %s |\n' "${number}" "${url}" "${status}"; done <"${file}"
   fi
   file="${REPORT_BASE}/.state/opc-version-comparison.tsv"
   if [[ -s "${file}" ]]; then

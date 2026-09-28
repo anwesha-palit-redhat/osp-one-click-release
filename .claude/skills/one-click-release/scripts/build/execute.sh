@@ -10,23 +10,19 @@ source "${SCRIPTS_DIR}/lib/release.sh"
 source "${SCRIPTS_DIR}/lib/stage-runner.sh"
 
 STAGE_NAME=build
-STAGE_STEPS=(2.1 2.2 2.3 2.4 2.5 2.6 2.7 2.8 2.9 2.10 2.11 2.12 2.13)
+STAGE_STEPS=(2.1 2.2 2.3 2.4 2.5 2.6 2.7 2.8 2.9)
 
 ocr_describe_action() {
   case "$1" in
-    2.1) printf 'Ensure code freeze is not active before starting the build.\n' ;;
-    2.2) printf 'Trigger update-sources workflow for all downstream components.\n' ;;
-    2.3) printf 'Merge update-source and release PRs on the release branch.\n' ;;
-    2.4) printf 'Create and merge the hack code-freeze PR.\n' ;;
-    2.5) printf 'Verify snapshot digests match project.yaml.\n' ;;
-    2.6) printf 'Trigger rebuild commits for repositories stale in the core snapshot.\n' ;;
-    2.7) printf 'Process nudge PRs, including conflict consolidation when required.\n' ;;
-    2.8) printf 'Gate: re-verify snapshot and digest checks both pass.\n' ;;
-    2.9) printf 'Create the core stage Release CR from the latest verified snapshot.\n' ;;
-    2.10) printf 'Run staging operator-update-images, merge its verified PR, and render the staging catalog.\n' ;;
-    2.11) printf 'Trigger bundle and index rebuilds for stale FBC snapshots.\n' ;;
-    2.12) printf 'Create the bundle stage Release CR after the core stage release succeeds.\n' ;;
-    2.13) printf 'Create index stage Release CRs after the bundle stage release succeeds.\n' ;;
+    2.1) printf 'Process open release PRs: rebase behind PRs and auto-merge green PRs.\n' ;;
+    2.2) printf 'Trigger rebuild commits for repositories stale in the core snapshot.\n' ;;
+    2.3) printf 'Create the core stage Release CR from the latest verified snapshot.\n' ;;
+    2.4) printf 'Process nudge PRs, including conflict consolidation when required.\n' ;;
+    2.5) printf 'Run staging operator-update-images, merge its verified PR, and render the staging catalog.\n' ;;
+    2.6) printf 'Trigger bundle and index rebuilds for stale FBC snapshots.\n' ;;
+    2.7) printf 'Create the bundle stage Release CR after the core stage release succeeds.\n' ;;
+    2.8) printf 'Create index stage Release CRs after the bundle stage release succeeds.\n' ;;
+    2.9) printf 'Create and merge the hack code-freeze PR.\n' ;;
   esac
 }
 
@@ -40,40 +36,24 @@ pr_ready() {
 }
 
 process_pr_urls() {
-  local url failed=0
+  local url state
   while IFS= read -r url; do
     [[ -n "${url}" ]] || continue
-    local data mergeable merge_state
-    data=$(gh pr view "${url}" --json mergeable,mergeStateStatus,statusCheckRollup)
-    mergeable=$(jq -r '.mergeable' <<<"${data}")
-    merge_state=$(jq -r '.mergeStateStatus' <<<"${data}")
-
-    if [[ "${mergeable}" == "CONFLICTING" || "${merge_state}" == "DIRTY" ]]; then
-      printf 'CONFLICT — requires manual resolution: %s\n' "${url}" >&2
-      ((failed += 1))
-    elif [[ "${merge_state}" == "BEHIND" ]]; then
-      printf 'BEHIND — rebasing: %s\n' "${url}" >&2
+    state=$(gh pr view "${url}" --json mergeStateStatus --jq '.mergeStateStatus')
+    if [[ "${state}" == BEHIND ]]; then
       gh pr update-branch "${url}" --rebase
-      ((failed += 1))
-    elif jq -e '[.statusCheckRollup[]? | select((.status//"") != "COMPLETED")] | length > 0' <<<"${data}" >/dev/null 2>&1; then
-      printf 'CI PENDING — checks still running: %s\n' "${url}" >&2
-      ((failed += 1))
-    elif ! pr_ready "${url}"; then
-      printf 'CI FAILING — requires manual investigation: %s\n' "${url}" >&2
-      ((failed += 1))
-    else
-      # Label-add is best-effort — don't fail if permissions are missing
-      if ! gh pr edit "${url}" --add-label lgtm,approved,one-click-release 2>/dev/null; then
-        printf 'WARNING: could not add labels (permissions?) — proceeding with merge: %s\n' "${url}" >&2
-      fi
+    elif pr_ready "${url}"; then
+      gh pr edit "${url}" --add-label lgtm,approved,one-click-release
       gh pr review --approve "${url}"
       gh pr merge "${url}" -d -r --auto
+    else
+      printf 'PR requires manual investigation or pending CI: %s\n' "${url}" >&2
+      return 2
     fi
   done
-  ((failed == 0)) || return 2
 }
 
-execute_2_3() {
+execute_2_1() {
   local prs
   prs=$(gh search prs --owner openshift-pipelines --base "${RELEASE_BRANCH}" --state open \
     --json url 'label:hack,upstream,automated') || {
@@ -116,31 +96,22 @@ push_placeholder() {
   rm -rf "${temp}"
 }
 
-execute_2_6() {
+execute_2_2() {
   ocr_require_konflux || return 2
-  local repo revs head stale=0 pending=0
+  local repo revs head stale=0
   while IFS='|' read -r repo revs; do
     head=$(git ls-remote "https://github.com/${repo}.git" "refs/heads/${RELEASE_BRANCH}" | awk '{print $1}')
     if [[ "${revs}" == *,* || "${revs}" != "${head}" ]]; then
       ((stale += 1))
       if ocr_mutation_done "core-rebuild-${repo}"; then
         printf 'Rebuild for %s was already pushed; waiting for a current snapshot.\n' "${repo}"
-        ((pending += 1))
         continue
       fi
-      #push_placeholder "${repo}" .konflux/patches/.placeholder 'One Click Release: build all konflux components'
-      repo_name="${repo##*/}"
-      gh workflow run trigger-image-rebuilds.yaml --repo openshift-pipelines/hack -f version="${MAJOR_MINOR}" -f repo="${repo_name}"
+      push_placeholder "${repo}" .konflux/patches/.placeholder 'One Click Release: build all konflux components'
       ocr_mark_mutation "core-rebuild-${repo}"
-      ((pending += 1))
     fi
   done < <(core_snapshot_rows)
-  if ((stale == 0)); then
-    printf 'All repos are current in the core snapshot.\n'
-    return 0
-  fi
-  printf '%d repo(s) stale; %d rebuild(s) pending.\n' "${stale}" "${pending}" >&2
-  return 2
+  ((stale > 0)) || printf 'No stale repositories found on re-check.\n'
 }
 
 find_app() {
@@ -205,15 +176,9 @@ create_stage_release() {
   ocr_create_release_manifest "${path}"
 }
 
-execute_2_9() {
+execute_2_3() {
   ocr_require_konflux || return 2
-  create_stage_release core || return $?
-  # Record the core snapshot for the production release (step 4.2)
-  local core_app
-  core_app=$(find_app core)
-  STAGE_CORE_SNAPSHOT=$(ocr_latest_snapshot "${core_app}")
-  export STAGE_CORE_SNAPSHOT
-  printf 'STAGE_CORE_SNAPSHOT=%s\n' "${STAGE_CORE_SNAPSHOT}" >>"${REPORT_BASE}/stage-vars.env"
+  create_stage_release core
 }
 
 consolidate_conflicting_nudges() {
@@ -256,8 +221,7 @@ consolidate_conflicting_nudges() {
   body=$(jq -r 'map("- #\(.number)") | join("\n")' <<<"${prs}")
   gh pr create --repo openshift-pipelines/operator --base "${RELEASE_BRANCH}" --head "${branch}" \
     --title "chore(deps): consolidated nudge updates for ${VERSION}" \
-    --body "Consolidates SHA updates from conflicting nudge PRs:
-${body}" \
+    --body "Consolidates SHA updates from conflicting nudge PRs:\n${body}" \
     --label konflux-nudge,lgtm,approved,one-click-release
   while IFS= read -r number; do
     gh pr close --repo openshift-pipelines/operator "${number}" \
@@ -265,30 +229,31 @@ ${body}" \
   done < <(jq -r '.[].number' <<<"${prs}")
 }
 
-execute_2_7() {
-  local prs urls=() ready_urls=() url data state failed=0
-  prs=$(gh pr list --repo openshift-pipelines/operator --base "${RELEASE_BRANCH}" --label konflux-nudge \
-    --state open --limit 100 --json url,mergeable,mergeStateStatus)
-  mapfile -t urls < <(jq -r '.[].url' <<<"${prs}")
-  ((${#urls[@]} > 0)) || return 0
-  for url in "${urls[@]}"; do
+execute_2_4() {
+  local prs
+  local -a ready_urls=()
+  prs=$(gh search prs --owner openshift-pipelines --base "${RELEASE_BRANCH}" --state open \
+    --json url 'label:konflux-nudge') || {
+    printf 'Unable to query nudge PRs; refusing to treat the result as empty.\n' >&2
+    return 2
+  }
+  local url data state
+  while IFS= read -r url; do
     data=$(gh pr view "${url}" --json mergeable,mergeStateStatus,statusCheckRollup)
     state=$(jq -r '.mergeStateStatus' <<<"${data}")
     if [[ "${state}" == BEHIND ]]; then
       gh pr update-branch "${url}" --rebase
-      ((failed += 1))
     elif pr_ready "${url}"; then
       ready_urls+=("${url}")
     elif [[ $(jq -r '.mergeable' <<<"${data}") != CONFLICTING ]]; then
       printf 'Nudge PR has failing or pending CI: %s\n' "${url}" >&2
-      ((failed += 1))
+      return 2
     fi
-  done
+  done < <(jq -r '.[].url' <<<"${prs}")
   if ((${#ready_urls[@]} > 0)); then
     printf '%s\n' "${ready_urls[@]}" | process_pr_urls
   fi
   consolidate_conflicting_nudges
-  ((failed == 0)) || return 2
 }
 
 latest_run_id() {
@@ -309,7 +274,7 @@ wait_in_progress_runs() {
   done < <(jq -r '.[] | select(.status=="in_progress" or .status=="queued") | .databaseId' <<<"${runs}")
 }
 
-execute_2_10() {
+execute_2_5() {
   local id pr diff merged_pr
   wait_in_progress_runs operator-update-images.yaml
   pr=$(gh pr list --repo openshift-pipelines/operator --head "actions/update/operator-update-images-${RELEASE_BRANCH}" \
@@ -321,20 +286,8 @@ execute_2_10() {
       pr=''
     fi
   fi
-  # Find the most recent commit on the release branch that modified the OLM catalog
-  local catalog_sha
-  catalog_sha=$(gh api "repos/openshift-pipelines/operator/commits?sha=${RELEASE_BRANCH}&path=.konflux/olm-catalog&per_page=1" --jq '.[0].sha // empty' 2>/dev/null)
-
-  if [[ -n "${catalog_sha}" ]]; then
-    merged_pr=$(gh api "repos/openshift-pipelines/operator/commits/${catalog_sha}/pulls" \
-      --jq '[.[] | select(.merged_at != null)][0].number // empty' 2>/dev/null)
-  fi
-
-  # Fallback to old method if commits API returned nothing
-  if [[ -z "${merged_pr}" ]]; then
-    merged_pr=$(gh pr list --repo openshift-pipelines/operator --head "actions/update/operator-update-images-${RELEASE_BRANCH}" \
-      --state merged --limit 1 --json number --jq '.[0].number // empty')
-  fi
+  merged_pr=$(gh pr list --repo openshift-pipelines/operator --head "actions/update/operator-update-images-${RELEASE_BRANCH}" \
+    --state merged --limit 1 --json number --jq '.[0].number // empty')
   if [[ -n "${merged_pr}" ]]; then
     diff=$(gh pr diff --repo openshift-pipelines/operator "${merged_pr}") || {
       printf 'Unable to inspect merged staging CSV PR; refusing to continue.\n' >&2
@@ -370,12 +323,12 @@ execute_2_10() {
   fi
   wait_in_progress_runs render-olm-catalog.yaml
   gh workflow run render-olm-catalog.yaml --repo openshift-pipelines/operator \
-    --ref "${RELEASE_BRANCH}" -f environment=staging
+    -f "branch=${RELEASE_BRANCH}" -f environment=staging
   id=$(latest_run_id render-olm-catalog.yaml)
   [[ -n "${id}" ]] && gh run watch --repo openshift-pipelines/operator "${id}"
 }
 
-execute_2_11() {
+execute_2_6() {
   ocr_require_konflux || return 2
   local apps head bundle snapshot rev stale_bundle=false stale_index=false app
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
@@ -406,14 +359,12 @@ execute_2_11() {
       ocr_mark_mutation fbc-index-rebuild
     fi
   fi
-  if [[ "${stale_bundle}" == true || "${stale_index}" == true ]]; then
-    printf 'FBC snapshot(s) still stale; waiting for rebuild(s) to complete.\n' >&2
-    return 2
+  if [[ "${stale_bundle}" == false && "${stale_index}" == false ]]; then
+    printf 'No stale bundle or index snapshots found on re-check.\n'
   fi
-  printf 'All FBC snapshots are current.\n'
 }
 
-execute_2_12() {
+execute_2_7() {
   ocr_require_konflux || return 2
   successful_release_exists core stage cdn || {
     printf 'Core stage release has not succeeded.\n' >&2
@@ -422,7 +373,7 @@ execute_2_12() {
   create_stage_release bundle
 }
 
-execute_2_13() {
+execute_2_8() {
   ocr_require_konflux || return 2
   successful_release_exists bundle stage || {
     printf 'Bundle stage release has not succeeded.\n' >&2
@@ -467,7 +418,7 @@ execute_2_13() {
   }
 }
 
-execute_2_4() {
+execute_2_9() {
   local temp branch pr open_url branch_rc
   temp=$(mktemp -d)
   branch="release/${VERSION}/code-freeze"
@@ -520,34 +471,10 @@ execute_2_4() {
   rm -rf "${temp}"
 }
 
-execute_2_5() {
-  ocr_require_konflux || return 2
-  printf 'No automatic mutation for digest verification.\n' >&2
-  printf 'If digests do not match, check for unmerged nudge PRs (step 2.4) or stale snapshots (step 2.2).\n' >&2
-  return 2
-}
-
-execute_2_1() {
-  printf 'Code freeze is active. Run: %s unfreeze %s\n' "$OCR" "${MAJOR_MINOR}"
-  return 2
-}
-
-execute_2_2() {
-  gh workflow run trigger-update-sources.yaml --repo openshift-pipelines/hack -f version="${MAJOR_MINOR}"
-  ocr_mark_mutation "trigger-update-sources"
-}
-
-execute_2_8() {
-  printf 'Gate check failed. Fix the underlying issue in the failing step.\n'
-  return 2
-}
-
 ocr_execute_step() {
   case "$1" in
     2.1) execute_2_1 ;; 2.2) execute_2_2 ;; 2.3) execute_2_3 ;; 2.4) execute_2_4 ;;
-    2.5) execute_2_5 ;; 2.6) execute_2_6 ;; 2.7) execute_2_7 ;; 2.8) execute_2_8 ;;
-    2.9) execute_2_9 ;; 2.10) execute_2_10 ;; 2.11) execute_2_11 ;; 2.12) execute_2_12 ;;
-    2.13) execute_2_13 ;;
+    2.5) execute_2_5 ;; 2.6) execute_2_6 ;; 2.7) execute_2_7 ;; 2.8) execute_2_8 ;; 2.9) execute_2_9 ;;
   esac
 }
 

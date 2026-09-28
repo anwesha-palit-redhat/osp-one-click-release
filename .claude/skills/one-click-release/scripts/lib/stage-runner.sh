@@ -14,12 +14,8 @@ ocr_verify_stage() {
   ocr_init_context "${version}" || return 64
   ocr_report_init "${STAGE_NAME}" "${STAGE_REPORT_TITLE}" "${STAGE_REPORT_DIR}"
 
-  local blocked=false prompt_shown=false step title rc skip_input
+  local blocked=false step title rc
   for step in "${STAGE_STEPS[@]}"; do
-    # --step: skip steps that aren't the requested one
-    if [[ -n "${OCR_VERIFY_STEP:-}" && "${step}" != "${OCR_VERIFY_STEP}" ]]; then
-      continue
-    fi
     title=$(ocr_step_title "${step}")
     if ocr_step_is_skipped "${step}"; then
       ocr_report_add "${step}" "${title}" 'SKIPPED' 'skipped by user' '—'
@@ -42,30 +38,12 @@ ocr_verify_stage() {
         ;;
       20)
         ocr_report_add "${step}" "${title}" 'SKIPPED' "${STEP_DETAILS:-credential unavailable}" "${STEP_LINKS:-—}"
-        if [[ -z "${OCR_VERIFY_STEP:-}" && -z "${OCR_SKIP_PROMPT:-}" ]]; then
-          printf 'BLOCKED: step %s — %s\n' "${step}" "${STEP_DETAILS:-credential unavailable}" >&2
-          printf 'Type "s" to skip this step and proceed, or press Enter to stop: ' >&2
-          IFS= read -r skip_input </dev/tty 2>/dev/null || true
-          if [[ "${skip_input}" == [sS] ]]; then
-            continue
-          fi
-          prompt_shown=true
-        fi
         OCR_BLOCKING_STEP=${step}
         OCR_BLOCKING_DETAILS=${STEP_DETAILS:-credential unavailable}
         blocked=true
         ;;
       10 | *)
         ocr_report_add "${step}" "${title}" 'ACTION NEEDED' "${STEP_DETAILS:-verification failed}" "${STEP_LINKS:-—}"
-        if [[ -z "${OCR_VERIFY_STEP:-}" && -z "${OCR_SKIP_PROMPT:-}" ]]; then
-          printf 'BLOCKED: step %s — %s\n' "${step}" "${STEP_DETAILS:-verification failed}" >&2
-          printf 'Type "s" to skip this step and proceed, or press Enter to stop: ' >&2
-          IFS= read -r skip_input </dev/tty 2>/dev/null || true
-          if [[ "${skip_input}" == [sS] ]]; then
-            continue
-          fi
-          prompt_shown=true
-        fi
         OCR_BLOCKING_STEP=${step}
         OCR_BLOCKING_DETAILS=${STEP_DETAILS:-verification failed}
         blocked=true
@@ -75,9 +53,7 @@ ocr_verify_stage() {
 
   ocr_report_write
   if [[ "${blocked}" == true ]]; then
-    if [[ "${prompt_shown}" != true ]]; then
-      printf 'BLOCKED: step %s — %s\n' "${OCR_BLOCKING_STEP}" "${OCR_BLOCKING_DETAILS}" >&2
-    fi
+    printf 'BLOCKED: step %s — %s\n' "${OCR_BLOCKING_STEP}" "${OCR_BLOCKING_DETAILS}" >&2
     return 2
   fi
   printf '%s stage verified.\n' "${STAGE_NAME}"
@@ -111,32 +87,23 @@ ocr_execute_stage() {
   done
 
   set +e
-  OCR_SKIP_PROMPT=1 "${STAGE_DIR}/verify.sh" "${version}" >/dev/null
+  "${STAGE_DIR}/verify.sh" "${version}" >/dev/null
   local verify_rc=$?
   set -e
   if [[ ${verify_rc} -eq 0 ]]; then
-    if [[ -n "${OCR_FORCE:-}" && -n "${requested_step}" ]]; then
-      printf '%s stage already complete; --force re-executing step %s.\n' "${STAGE_NAME}" "${requested_step}"
-    else
-      printf '%s stage is already complete; nothing to execute.\n' "${STAGE_NAME}"
-      return 0
-    fi
-  else
-    local blocking_step
-    blocking_step=$(ocr_state_blocking_step "${STAGE_NAME}") || {
-      printf 'Unable to determine the blocking step; run verify first.\n' >&2
-      return 2
-    }
-    if [[ -z "${requested_step}" ]]; then
-      requested_step=${blocking_step}
-    elif [[ "${requested_step}" != "${blocking_step}" ]]; then
-      if [[ -n "${OCR_FORCE:-}" ]]; then
-        printf 'Overriding blocker step %s; --force re-executing step %s.\n' "${blocking_step}" "${requested_step}"
-      else
-        printf 'Refusing step %s: the freshly verified blocker is step %s.\n' "${requested_step}" "${blocking_step}" >&2
-        return 2
-      fi
-    fi
+    printf '%s stage is already complete; nothing to execute.\n' "${STAGE_NAME}"
+    return 0
+  fi
+  local blocking_step
+  blocking_step=$(ocr_state_blocking_step "${STAGE_NAME}") || {
+    printf 'Unable to determine the blocking step; run verify first.\n' >&2
+    return 2
+  }
+  if [[ -z "${requested_step}" ]]; then
+    requested_step=${blocking_step}
+  elif [[ "${requested_step}" != "${blocking_step}" ]]; then
+    printf 'Refusing step %s: the freshly verified blocker is step %s.\n' "${requested_step}" "${blocking_step}" >&2
+    return 2
   fi
 
   local valid=false step
@@ -165,19 +132,5 @@ ocr_execute_stage() {
   if [[ "${guard_rerun}" == true ]]; then
     date +"${TZ_FMT}" >"${mutation_marker}"
   fi
-  local post_verify_rc skip_input
-  set +e
-  OCR_SKIP_PROMPT=1 "${STAGE_DIR}/verify.sh" "${version}"
-  post_verify_rc=$?
-  set -e
-  if [[ ${post_verify_rc} -eq 2 && -z "${2:-}" ]]; then
-    printf 'Type "s" to skip this step and proceed, or press Enter to stop: ' >&2
-    IFS= read -r skip_input </dev/tty 2>/dev/null || true
-    if [[ "${skip_input}" == [sS] ]]; then
-      return 0
-    fi
-    return ${post_verify_rc}
-  elif [[ ${post_verify_rc} -ne 0 ]]; then
-    return ${post_verify_rc}
-  fi
+  "${STAGE_DIR}/verify.sh" "${version}"
 }

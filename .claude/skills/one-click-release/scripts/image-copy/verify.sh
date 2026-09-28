@@ -41,47 +41,29 @@ verify_3_1() {
   while IFS= read -r app; do
     printf '%s\t%s\n' "${app}" "$(ocr_latest_snapshot "${app}")" >>"${expected_file}"
   done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
-    python3 - "${MM_DASHED}" "${VERSION}" "${releases_file}" "${expected_file}" >"${state}" <<'PY'
-import json, re, sys
-mm, version, path, expected_path = sys.argv[1:]
-data = json.load(open(path))
-
-def iib_images(item):
-    """Return {ocp_version: index_image_resolved} from a release CR."""
-    art = item.get('status', {}).get('artifacts', {}) or {}
-    out = {}
-    for c in art.get('components', []) or []:
-        img = c.get('index_image_resolved', '')
-        if img:
-            out[c.get('ocp_version', '').lstrip('v')] = img
-    for ver, d in (art.get('index_image', {}) or {}).items():
-        img = d.get('index_image_resolved', '')
-        if img:
-            out.setdefault(ver.lstrip('v'), img)
-    return out
-
-def released(item):
-    return next((c.get('status') for c in item.get('status', {}).get('conditions', [])
-                 if c.get('type') == 'Released'), 'Unknown')
-
+  python3 - "${MM_DASHED}" "${VERSION}" "${releases_file}" "${expected_file}" >"${state}" <<'PY'
+import json,re,sys
+mm,version,path,expected_path=sys.argv[1:]
+data=json.load(open(path))
 for line in open(expected_path):
-    app, snapshot = line.rstrip('\n').split('\t')
-    m = re.search(r'index-(\d+)-(\d+)-' + re.escape(mm), app)
-    ocp = f'{m.group(1)}.{m.group(2)}' if m else 'unknown'
-    candidates = []
-    for item in data.get('items', []):
-        rp = item.get('spec', {}).get('releasePlan', '')
-        if item.get('spec', {}).get('snapshot') != snapshot: continue
-        if 'stage' not in rp or not ('fbc' in rp or 'index' in rp): continue
-        candidates.append(item)
-    candidates.sort(key=lambda x: (x['metadata'].get('creationTimestamp', ''), x['metadata'].get('name', '')))
-    successful = [x for x in candidates if released(x) == 'True']
-    item = (successful[-1] if successful else candidates[-1] if candidates
-            else {'metadata': {'name': 'missing'}, 'spec': {'releasePlan': ''}, 'status': {}})
-    image = iib_images(item).get(ocp, '')
-    target = f'quay.io/openshift-pipeline/pipelines-index-{ocp}:v{version}-stage'
-    print('\t'.join([item['metadata']['name'], item['spec'].get('releasePlan', ''),
-                     released(item), image, ocp, target, snapshot]))
+    app,snapshot=line.rstrip('\n').split('\t')
+    candidates=[]
+    for item in data.get('items',[]):
+      rp=item.get('spec',{}).get('releasePlan','')
+      if item.get('spec',{}).get('snapshot') != snapshot or app not in rp or 'stage' not in rp or not ('fbc' in rp or 'index' in rp): continue
+      candidates.append(item)
+    candidates.sort(key=lambda x:(x.get('metadata',{}).get('creationTimestamp',''),x.get('metadata',{}).get('name','')))
+    successful=[x for x in candidates if next((c.get('status') for c in x.get('status',{}).get('conditions',[]) if c.get('type')=='Released'),'Unknown')=='True']
+    item=(successful[-1] if successful else candidates[-1] if candidates else {'metadata':{'name':'missing'},'spec':{'releasePlan':app+'-stage'},'status':{}})
+    rp=item.get('spec',{}).get('releasePlan','')
+    cond=next((c for c in item.get('status',{}).get('conditions',[]) if c.get('type')=='Released'),{})
+    art=item.get('status',{}).get('artifacts',{})
+    image=(art.get('indexImageResolved') or art.get('indexImage') or
+           art.get('iibIndexImageResolved') or art.get('index_image_resolved') or '')
+    m=re.search(r'index-(.+?)-'+re.escape(mm)+r'-stage',rp)
+    ocp=(m.group(1).replace('-','.',1) if m else 'unknown')
+    target=f'quay.io/openshift-pipeline/pipelines-index-{ocp}:v{version}-stage'
+    print('\t'.join([item['metadata']['name'],rp,cond.get('status','Unknown'),image,ocp,target,snapshot]))
 PY
   superseded=$(jq --arg mm "${MM_DASHED}" '[.items[] | select(.spec.releasePlan|contains($mm) and contains("stage")) | select(any(.status.conditions[]?; .type=="Released" and .status=="False"))] | length' <<<"${releases}")
   rm -f "${releases_file}" "${expected_file}"
@@ -102,7 +84,7 @@ verify_3_2() {
     STEP_DETAILS='skopeo not installed; approved execution can generate a copy script'
     return "${OCR_RC_BLOCKED}"
   fi
-  while IFS=$'\t' read -r _release _rp _status image _ocp target _snapshot; do
+  while IFS=$'\t' read -r _release _rp _status image _ocp target; do
     ((count += 1))
     source_digest=${image##*@}
     inspected=$(skopeo inspect --no-tags "docker://${target}" 2>/dev/null || true)
