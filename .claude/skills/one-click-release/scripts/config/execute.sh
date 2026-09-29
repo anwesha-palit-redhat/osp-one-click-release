@@ -93,24 +93,42 @@ execute_1_5() {
 
   # Minor-version RPAs exist but patch content needs updating
   # Clone fork, update CDN RPAs and create developer-portal file, open MR
-  local temp branch fork_project_id target_project_id mr_url
+  local temp branch fork_project_id target_project_id mr_url gitlab_username
   temp=$(mktemp -d)
   trap 'rm -rf "${temp}"' RETURN
 
-  printf 'Cloning konflux-release-data fork...\n'
-  git clone --depth 1 "https://oauth2:${GITLAB_TOKEN}@${GITLAB_URL#https://}/releng/konflux-release-data.git" "${temp}/krd" 2>/dev/null || {
-    # If clone fails (no fork access), try forking first
-    printf 'Direct clone failed. Creating fork...\n'
-    curl -s --request POST --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-      "${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data/fork" >/dev/null 2>&1 || true
-    sleep 2
-    git clone --depth 1 "https://oauth2:${GITLAB_TOKEN}@${GITLAB_URL#https://}/${GITLAB_USER:-$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "${GITLAB_URL}/api/v4/user" | jq -r .username)}/konflux-release-data.git" "${temp}/krd" 2>/dev/null || {
-      printf 'Unable to clone konflux-release-data fork.\n' >&2
-      rm -rf "${temp}"; trap - RETURN
-      manual_action 'MANUAL: update CDN RPA productVersionName and create developer-portal version file via a GitLab MR.'
-      return
-    }
+  # 1. Resolve the GitLab username
+  gitlab_username="${GITLAB_USER:-}"
+  if [[ -z "${gitlab_username}" ]]; then
+    gitlab_username=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+      "${GITLAB_URL}/api/v4/user" | jq -r '.username // empty')
+  fi
+  if [[ -z "${gitlab_username}" ]]; then
+    printf 'Unable to determine GitLab username. Set GITLAB_USER or check GITLAB_TOKEN.\n' >&2
+    rm -rf "${temp}"; trap - RETURN
+    manual_action 'MANUAL: update CDN RPA productVersionName and create developer-portal version file via a GitLab MR.'
+    return
+  fi
+  printf 'Resolved GitLab username: %s\n' "${gitlab_username}"
+
+  # 2. Ensure a fork exists (create one if needed; idempotent)
+  printf 'Ensuring fork of konflux-release-data exists...\n'
+  curl -s --request POST --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+    "${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data/fork" >/dev/null 2>&1 || true
+  sleep 2
+
+  # 3. Clone the user's fork (not the main repo)
+  printf 'Cloning fork: %s/konflux-release-data...\n' "${gitlab_username}"
+  git clone --depth 1 "https://oauth2:${GITLAB_TOKEN}@${GITLAB_URL#https://}/${gitlab_username}/konflux-release-data.git" "${temp}/krd" 2>/dev/null || {
+    printf 'Unable to clone fork at %s/konflux-release-data.\n' "${gitlab_username}" >&2
+    rm -rf "${temp}"; trap - RETURN
+    manual_action 'MANUAL: update CDN RPA productVersionName and create developer-portal version file via a GitLab MR.'
+    return
   }
+
+  # 4. Add upstream remote for reference
+  git -C "${temp}/krd" remote add upstream \
+    "https://oauth2:${GITLAB_TOKEN}@${GITLAB_URL#https://}/releng/konflux-release-data.git" 2>/dev/null || true
 
   branch="openshift-pipelines-${VERSION}-rpa-update"
   (
@@ -172,6 +190,7 @@ EOF
 
     git add -A
     git commit -m "Update RPA and developer-portal for openshift-pipelines ${VERSION}"
+    # 5. Push to origin — which now points to the fork, not the main repo
     git push origin "${branch}" 2>/dev/null
   ) || {
     printf 'Failed to prepare and push branch.\n' >&2
@@ -180,11 +199,11 @@ EOF
     return
   }
 
-  # Open MR via GitLab API
-  # Get project IDs
+  # 6. Open MR via GitLab API using the fork as source
+  # Look up the fork project ID reliably via the username-based path
   fork_project_id=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-    "${GITLAB_URL}/api/v4/projects?search=konflux-release-data&owned=true&per_page=5" \
-    | jq -r '.[0].id // empty')
+    "${GITLAB_URL}/api/v4/projects/${gitlab_username}%2Fkonflux-release-data" \
+    | jq -r '.id // empty')
   target_project_id=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
     "${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data" \
     | jq -r '.id // empty')
