@@ -57,16 +57,15 @@ execute_1_4() {
   temp=$(mktemp -d)
   trap 'rm -rf "${temp}"' RETURN
   git clone --depth 1 https://github.com/openshift-pipelines/hack.git "${temp}/hack"
-  mapfile -t files < <(find "${temp}/hack/.konflux/openshift-pipelines/${MM_DASHED}" -name '*.yaml' \
-    ! -name role.yaml ! -name service-account.yaml -print)
-  ((${#files[@]} > 0)) || {
-    printf 'No Konflux YAML files found.\n' >&2
+  find "${temp}/hack/.konflux/openshift-pipelines/${MM_DASHED}/" -name '*.yaml' \
+    ! -name 'role.yaml' ! -name 'service-account.yaml' \
+    -exec kubectl apply --server="${KONFLUX_SERVER}" --token="${KONFLUX_TOKEN}" \
+    --insecure-skip-tls-verify -n "${KONFLUX_NS}" -f {} + || {
+    printf 'kubectl apply failed.\n' >&2
+    rm -rf "${temp}"
+    trap - RETURN
     return 2
   }
-  local -a file_args=()
-  local file
-  for file in "${files[@]}"; do file_args+=(-f "${file}"); done
-  kubectl apply -n "${KONFLUX_NS}" "${file_args[@]}"
   rm -rf "${temp}"
   trap - RETURN
 }

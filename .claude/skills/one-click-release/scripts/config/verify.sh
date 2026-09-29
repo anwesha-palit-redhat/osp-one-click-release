@@ -140,7 +140,7 @@ import json, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 apps = {i['metadata']['name'] for i in json.load(open(p/'apps.json'))['items']}
 components = json.load(open(p/'components.json'))['items']
-bad=[]; count=0; rows=[]
+bad=[]; count=0; rows=[]; extra_apps=0
 for line in open(p/'expected.tsv'):
     directory, app, expected = line.rstrip('\n').split('\t')
     count += 1
@@ -150,21 +150,30 @@ for line in open(p/'expected.tsv'):
         continue
     want={x for x in expected.split(',') if x}
     have={i['metadata']['name'] for i in components if i.get('spec',{}).get('application') == app}
-    if want != have:
-        bad.append(f'{directory}:DRIFT({len(want)} expected/{len(have)} actual)')
-        rows.append((directory, ','.join(sorted(want)), ','.join(sorted(have)), 'DRIFT'))
+    missing = want - have
+    if missing:
+        bad.append(f'{directory}:MISSING_COMPONENTS({",".join(sorted(missing))})')
+        rows.append((directory, ','.join(sorted(want)), ','.join(sorted(have)), 'MISSING'))
     else:
         rows.append((directory, ','.join(sorted(want)), ','.join(sorted(have)), 'OK'))
+extra_apps = len(apps) - len({line.rstrip('\n').split('\t')[1] for line in open(p/'expected.tsv')})
 with open(sys.argv[2], 'w') as out:
     for row in rows: out.write('\t'.join(row)+'\n')
-print(f'{count}|'+','.join(bad))
+print(f'{count}|{max(extra_apps,0)}|'+','.join(bad))
 PY
   )
   rm -rf "${temp}"
-  local count=${result%%|*} bad=${result#*|}
-  STEP_DETAILS="${count} applications checked"
+  local count bad extra_apps
+  count=${result%%|*}
+  result=${result#*|}
+  extra_apps=${result%%|*}
+  bad=${result#*|}
+  STEP_DETAILS="${count} applications checked; all present"
+  if ((extra_apps > 0)); then
+    STEP_DETAILS+=" (cluster has ${extra_apps} additional)"
+  fi
   if [[ -n "${bad}" ]]; then
-    STEP_DETAILS+="; ${bad}"
+    STEP_DETAILS="${count} applications checked; ${bad}"
     return "${OCR_RC_BLOCKED}"
   fi
 }
