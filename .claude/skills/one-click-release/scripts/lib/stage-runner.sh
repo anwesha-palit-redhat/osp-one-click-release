@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 
+ocr_step_is_skipped() {
+  local step=$1 skip
+  local IFS=','
+  for skip in ${OCR_SKIP_STEPS:-}; do
+    [[ "${skip}" == "${step}" ]] && return 0
+  done
+  return 1
+}
+
 ocr_verify_stage() {
   local version=$1
   ocr_init_context "${version}" || return 64
@@ -8,6 +17,10 @@ ocr_verify_stage() {
   local blocked=false step title rc
   for step in "${STAGE_STEPS[@]}"; do
     title=$(ocr_step_title "${step}")
+    if ocr_step_is_skipped "${step}"; then
+      ocr_report_add "${step}" "${title}" 'SKIPPED' 'skipped by user' '—'
+      continue
+    fi
     if [[ "${blocked}" == true ]]; then
       ocr_report_add "${step}" "${title}" 'SKIPPED' 'not checked after blocking step' '—'
       continue

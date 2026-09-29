@@ -355,5 +355,25 @@ assert_eq '2' "$(run_rc "${SCRIPTS_DIR}/one-click-release.sh" verify 1.21.3 --st
 if grep -q '^BLOCKING_STEP=1\\.2$\|^BLOCKING_STEP=1.2$' "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config.state"; then pass 'sequential state records step 1.2 after patch dispatch'; else fail 'sequential state records step 1.2 after patch dispatch'; fi
 unset OCR_TEST_GH_SCENARIO
 
+# --skip flag tests
+: >"${OCR_TEST_COMMAND_LOG}"
+assert_eq '2' "$(run_rc "${SCRIPTS_DIR}/one-click-release.sh" verify 1.21.3 --stage config --skip 1.1)" '--skip advances past the skipped step to the next blocker'
+skip_report="${OCR_REPORT_ROOT}/1.21/1.21.3/config/report_2026-09-28_12-00-00_UTC.md"
+if grep -q '^| 1.1 | Create new patch version | SKIPPED | skipped by user |' "${skip_report}"; then pass '--skip marks skipped step with user-skip detail'; else fail '--skip marks skipped step with user-skip detail'; fi
+if grep -q '^BLOCKING_STEP=1\\.2$\|^BLOCKING_STEP=1.2$' "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config.state"; then pass '--skip does not block on the skipped step'; else fail '--skip does not block on the skipped step'; fi
+
+: >"${OCR_TEST_COMMAND_LOG}"
+assert_eq '2' "$(run_rc "${SCRIPTS_DIR}/one-click-release.sh" verify 1.21.3 --stage config --skip 1.1,1.2)" '--skip with multiple steps advances past both skipped steps'
+if grep -q '^| 1.1 | Create new patch version | SKIPPED | skipped by user |' "${skip_report}" &&
+  grep -q '^| 1.2 | Merge release-manager PR | SKIPPED | skipped by user |' "${skip_report}"; then
+  pass '--skip with comma-separated list skips multiple steps'
+else
+  fail '--skip with comma-separated list skips multiple steps'
+fi
+
+: >"${OCR_TEST_COMMAND_LOG}"
+assert_eq '2' "$(run_rc "${SCRIPTS_DIR}/one-click-release.sh" verify 1.21.3 --stage config)" 'verify without --skip is unchanged (backward compatible)'
+if grep -q '^| 1.1 | Create new patch version | ACTION NEEDED |' "${skip_report}"; then pass 'without --skip step 1.1 is checked normally'; else fail 'without --skip step 1.1 is checked normally'; fi
+
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
 ((FAIL == 0))

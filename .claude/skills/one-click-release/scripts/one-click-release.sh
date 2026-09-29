@@ -10,11 +10,15 @@ usage() {
   cat <<'EOF'
 Usage:
   one-click-release.sh verify VERSION
-  one-click-release.sh verify VERSION --stage STAGE
+  one-click-release.sh verify VERSION --stage STAGE [--skip STEPS]
   one-click-release.sh execute VERSION --stage STAGE [--step STEP]
   one-click-release.sh run VERSION --through STAGE
 
 Stages: config, build, image-copy, production-release
+
+Options:
+  --skip STEPS  Comma-separated step numbers to skip during verify
+                (e.g. --skip 1.5 or --skip 1.5,1.6)
 
 Verification is read-only. Execution always requires an exact interactive
 approval phrase. production-release also requires its separate production gate.
@@ -41,10 +45,15 @@ case "${command}" in
     version=${2:-}
     shift 2 || true
     stage=''
+    skip=''
     while (($#)); do
       case "$1" in
         --stage)
           stage=$(ocr_normalize_stage "${2:-}")
+          shift 2
+          ;;
+        --skip)
+          skip=${2:-}
           shift 2
           ;;
         *)
@@ -54,6 +63,7 @@ case "${command}" in
       esac
     done
     ocr_validate_version "${version}" || exit 64
+    [[ -z "${skip}" ]] || export OCR_SKIP_STEPS="${skip}"
     if [[ -n "${stage}" ]]; then
       run_verify "${version}" "${stage}"
     else
