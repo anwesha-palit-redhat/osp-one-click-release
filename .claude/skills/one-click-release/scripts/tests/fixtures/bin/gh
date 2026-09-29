@@ -34,11 +34,14 @@ case " $* " in
       printf '%s' $'release-tag: 1.21.2\ncode-freeze: false\n' | base64
     fi
     ;;
-  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/core "*)
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-core "*)
     printf 'controller\nwebhook\n'
     ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-index-4.14 "*)
+    printf 'index\n'
+    ;;
   *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21 "*)
-    printf 'core\n'
+    printf 'openshift-pipelines-core\nopenshift-pipelines-index-4.14\n'
     ;;
   *" api repos/openshift-pipelines/operator/compare/old...new "*)
     if [[ "${OCR_TEST_GH_SCENARIO:-}" == generated_good ]]; then

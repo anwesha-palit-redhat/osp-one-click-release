@@ -124,7 +124,7 @@ verify_1_4() {
   local dir cluster_app expected_components
   while IFS= read -r dir; do
     [[ -n "${dir}" ]] || continue
-    cluster_app="openshift-pipelines-${dir//./-}-${MM_DASHED}"
+    cluster_app="${dir//./-}-${MM_DASHED}"
     expected_components=$(gh api "repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/${MM_DASHED}/${dir}" \
       --jq '[.[] | select(.type == "dir") | .name] | sort[]' 2>/dev/null || true)
     printf '%s\t%s\t%s\n' "${dir}" "${cluster_app}" "$(paste -sd, - <<<"${expected_components}")" >>"${temp}/expected.tsv"

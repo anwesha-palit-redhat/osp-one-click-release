@@ -178,8 +178,9 @@ export OCR_TEST_GH_SCENARIO=config_match
 export OCR_TEST_OC_SCENARIO=config_match
 assert_eq '2' "$(run_rc "${SCRIPTS_DIR}/config/verify.sh" 1.21.3)" 'matching Step 1.4 fixture advances beyond the application comparison'
 config_report="${OCR_REPORT_ROOT}/1.21/1.21.3/config/report_2026-09-28_12-00-00_UTC.md"
-if grep -Fq '| 1.4 | Konflux config on cluster | DONE | 1 applications checked |' "${config_report}" &&
-  grep -Fq $'core\tcontroller,webhook\tcontroller,webhook\tOK' "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config-applications.tsv"; then
+if grep -Fq '| 1.4 | Konflux config on cluster | DONE | 2 applications checked |' "${config_report}" &&
+  grep -Fq $'openshift-pipelines-core\tcontroller,webhook\tcontroller,webhook\tOK' "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config-applications.tsv" &&
+  grep -Fq $'openshift-pipelines-index-4.14\tindex\tindex\tOK' "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config-applications.tsv"; then
   pass 'Step 1.4 accepts exactly matching application names and components'
 else
   fail 'Step 1.4 accepts exactly matching application names and components'
@@ -193,12 +194,13 @@ fi
 : >"${OCR_TEST_COMMAND_LOG}"
 export OCR_TEST_GH_SCENARIO=config_missing_app
 export OCR_TEST_OC_SCENARIO=config_missing_app
-assert_eq '2' "$(run_rc "${SCRIPTS_DIR}/config/verify.sh" 1.21.3)" 'misnamed Step 1.4 application fails closed'
-if grep -Fq '| 1.4 | Konflux config on cluster | ACTION NEEDED | 1 applications checked; core:MISSING_APP |' "${config_report}" &&
-  grep -Fq $'core\tcontroller,webhook\t\tMISSING' "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config-applications.tsv"; then
-  pass 'Step 1.4 reports a missing or misnamed application as MISSING_APP'
+assert_eq '2' "$(run_rc "${SCRIPTS_DIR}/config/verify.sh" 1.21.3)" 'missing Step 1.4 index application fails closed'
+if grep -Fq '| 1.4 | Konflux config on cluster | ACTION NEEDED | 2 applications checked; openshift-pipelines-index-4.14:MISSING_APP |' "${config_report}" &&
+  grep -Fq $'openshift-pipelines-core\tcontroller,webhook\tcontroller,webhook\tOK' "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config-applications.tsv" &&
+  grep -Fq $'openshift-pipelines-index-4.14\tindex\t\tMISSING' "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config-applications.tsv"; then
+  pass 'Step 1.4 reports an omitted index application as MISSING_APP'
 else
-  fail 'Step 1.4 reports a missing or misnamed application as MISSING_APP'
+  fail 'Step 1.4 reports an omitted index application as MISSING_APP'
 fi
 unset OCR_TEST_GH_SCENARIO OCR_TEST_OC_SCENARIO
 
