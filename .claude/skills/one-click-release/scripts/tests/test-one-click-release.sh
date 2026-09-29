@@ -202,6 +202,16 @@ if grep -Fq '| 1.4 | Konflux config on cluster | ACTION NEEDED | 2 applications 
 else
   fail 'Step 1.4 reports an omitted index application as MISSING_APP'
 fi
+
+export OCR_TEST_GH_SCENARIO=config_component_api_fail
+export OCR_TEST_OC_SCENARIO=config_component_api_fail
+assert_eq '2' "$(run_rc "${SCRIPTS_DIR}/config/verify.sh" 1.21.3)" 'Step 1.4 blocks when an expected component listing fails'
+if grep -Fq '| 1.4 | Konflux config on cluster | ACTION NEEDED | unable to list expected components for openshift-pipelines-index-4.14 |' "${config_report}" &&
+  [[ ! -s "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config-applications.tsv" ]]; then
+  pass 'Step 1.4 fails closed without retaining stale component parity state'
+else
+  fail 'Step 1.4 fails closed without retaining stale component parity state'
+fi
 unset OCR_TEST_GH_SCENARIO OCR_TEST_OC_SCENARIO
 
 assert_eq '[REDACTED] and [REDACTED]' "$(GITHUB_TOKEN=github-secret KONFLUX_TOKEN=cluster-secret ocr_redact 'github-secret and cluster-secret')" 'secret redaction removes credential values'

@@ -104,6 +104,7 @@ verify_1_3() {
 verify_1_4() {
   ocr_require_konflux || return $?
   local expected apps components temp result
+  : >"${REPORT_BASE}/.state/config-applications.tsv"
   expected=$(gh api "repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/${MM_DASHED}" \
     --jq '[.[] | select(.type == "dir") | .name] | sort[]') || {
     STEP_DETAILS='unable to list expected Konflux applications'
@@ -125,8 +126,12 @@ verify_1_4() {
   while IFS= read -r dir; do
     [[ -n "${dir}" ]] || continue
     cluster_app="${dir//./-}-${MM_DASHED}"
-    expected_components=$(gh api "repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/${MM_DASHED}/${dir}" \
-      --jq '[.[] | select(.type == "dir") | .name] | sort[]' 2>/dev/null || true)
+    if ! expected_components=$(gh api "repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/${MM_DASHED}/${dir}" \
+      --jq '[.[] | select(.type == "dir") | .name] | sort[]' 2>/dev/null); then
+      rm -rf "${temp}"
+      STEP_DETAILS="unable to list expected components for ${dir}"
+      return "${OCR_RC_BLOCKED}"
+    fi
     printf '%s\t%s\t%s\n' "${dir}" "${cluster_app}" "$(paste -sd, - <<<"${expected_components}")" >>"${temp}/expected.tsv"
   done <<<"${expected}"
   result=$(
