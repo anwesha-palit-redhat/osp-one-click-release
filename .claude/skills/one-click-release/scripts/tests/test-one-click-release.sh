@@ -178,7 +178,7 @@ export OCR_TEST_GH_SCENARIO=config_match
 export OCR_TEST_OC_SCENARIO=config_match
 assert_eq '2' "$(run_rc "${SCRIPTS_DIR}/config/verify.sh" 1.21.3)" 'matching Step 1.4 fixture advances beyond the application comparison'
 config_report="${OCR_REPORT_ROOT}/1.21/1.21.3/config/report_2026-09-28_12-00-00_UTC.md"
-if grep -Fq '| 1.4 | Konflux config on cluster | DONE | 2 applications checked |' "${config_report}" &&
+if grep -Fq '| 1.4 | Konflux config on cluster | DONE | 2 applications checked; all present |' "${config_report}" &&
   grep -Fq $'openshift-pipelines-core\tcontroller,webhook\tcontroller,webhook\tOK' "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config-applications.tsv" &&
   grep -Fq $'openshift-pipelines-index-4.14\tindex\tindex\tOK' "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config-applications.tsv"; then
   pass 'Step 1.4 accepts exactly matching application names and components'
@@ -211,6 +211,30 @@ if grep -Fq '| 1.4 | Konflux config on cluster | ACTION NEEDED | unable to list 
   pass 'Step 1.4 fails closed without retaining stale component parity state'
 else
   fail 'Step 1.4 fails closed without retaining stale component parity state'
+fi
+
+: >"${OCR_TEST_COMMAND_LOG}"
+export OCR_TEST_GH_SCENARIO=config_superset
+export OCR_TEST_OC_SCENARIO=config_superset
+assert_eq '2' "$(run_rc "${SCRIPTS_DIR}/config/verify.sh" 1.21.3)" 'superset Step 1.4 fixture advances beyond the application comparison'
+if grep -Fq '| 1.4 | Konflux config on cluster | DONE | 2 applications checked; all present (cluster has 1 additional) |' "${config_report}" &&
+  grep -Fq $'openshift-pipelines-core\tcontroller,webhook\tcontroller,extra-controller,webhook\tOK' "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config-applications.tsv" &&
+  grep -Fq $'openshift-pipelines-index-4.14\tindex\textra-index,index\tOK' "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config-applications.tsv"; then
+  pass 'Step 1.4 accepts extra cluster apps and components without flagging DRIFT'
+else
+  fail 'Step 1.4 accepts extra cluster apps and components without flagging DRIFT'
+fi
+
+: >"${OCR_TEST_COMMAND_LOG}"
+export OCR_TEST_GH_SCENARIO=config_missing_component
+export OCR_TEST_OC_SCENARIO=config_missing_component
+assert_eq '2' "$(run_rc "${SCRIPTS_DIR}/config/verify.sh" 1.21.3)" 'missing component Step 1.4 fixture reports blocked'
+if grep -Fq '| 1.4 | Konflux config on cluster | ACTION NEEDED | 2 applications checked; openshift-pipelines-core:MISSING_COMPONENTS(webhook) |' "${config_report}" &&
+  grep -Fq $'openshift-pipelines-core\tcontroller,webhook\tcontroller\tMISSING' "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config-applications.tsv" &&
+  grep -Fq $'openshift-pipelines-index-4.14\tindex\tindex\tOK' "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config-applications.tsv"; then
+  pass 'Step 1.4 flags missing hack-defined components as MISSING'
+else
+  fail 'Step 1.4 flags missing hack-defined components as MISSING'
 fi
 unset OCR_TEST_GH_SCENARIO OCR_TEST_OC_SCENARIO
 

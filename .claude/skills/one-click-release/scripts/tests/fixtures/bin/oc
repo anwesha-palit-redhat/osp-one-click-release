@@ -8,6 +8,12 @@ case " $* " in
       printf '%s\n' '{"items":[{"metadata":{"name":"openshift-pipelines-core-1-21"}},{"metadata":{"name":"openshift-pipelines-index-4-14-1-21"}}]}'
     elif [[ "${OCR_TEST_OC_SCENARIO:-}" == config_missing_app ]]; then
       printf '%s\n' '{"items":[{"metadata":{"name":"openshift-pipelines-core-1-21"}}]}'
+    elif [[ "${OCR_TEST_OC_SCENARIO:-}" == config_superset ]]; then
+      # Cluster has hack-defined apps plus an extra app not in hack config
+      printf '%s\n' '{"items":[{"metadata":{"name":"openshift-pipelines-core-1-21"}},{"metadata":{"name":"openshift-pipelines-index-4-14-1-21"}},{"metadata":{"name":"openshift-pipelines-extra-1-21"}}]}'
+    elif [[ "${OCR_TEST_OC_SCENARIO:-}" == config_missing_component ]]; then
+      # All apps present but a component is missing
+      printf '%s\n' '{"items":[{"metadata":{"name":"openshift-pipelines-core-1-21"}},{"metadata":{"name":"openshift-pipelines-index-4-14-1-21"}}]}'
     elif [[ "${OCR_TEST_OC_SCENARIO:-}" == image ]]; then
       printf '%s\n' '{"items":[{"metadata":{"name":"openshift-pipelines-index-4-14-1-21"}}]}'
     else
@@ -19,6 +25,12 @@ case " $* " in
       printf '%s\n' '{"items":[{"metadata":{"name":"controller"},"spec":{"application":"openshift-pipelines-core-1-21"}},{"metadata":{"name":"webhook"},"spec":{"application":"openshift-pipelines-core-1-21"}},{"metadata":{"name":"index"},"spec":{"application":"openshift-pipelines-index-4-14-1-21"}}]}'
     elif [[ "${OCR_TEST_OC_SCENARIO:-}" == config_missing_app || "${OCR_TEST_OC_SCENARIO:-}" == config_component_api_fail ]]; then
       printf '%s\n' '{"items":[{"metadata":{"name":"controller"},"spec":{"application":"openshift-pipelines-core-1-21"}},{"metadata":{"name":"webhook"},"spec":{"application":"openshift-pipelines-core-1-21"}}]}'
+    elif [[ "${OCR_TEST_OC_SCENARIO:-}" == config_superset ]]; then
+      # Hack-defined components plus extra cluster components
+      printf '%s\n' '{"items":[{"metadata":{"name":"controller"},"spec":{"application":"openshift-pipelines-core-1-21"}},{"metadata":{"name":"webhook"},"spec":{"application":"openshift-pipelines-core-1-21"}},{"metadata":{"name":"extra-controller"},"spec":{"application":"openshift-pipelines-core-1-21"}},{"metadata":{"name":"index"},"spec":{"application":"openshift-pipelines-index-4-14-1-21"}},{"metadata":{"name":"extra-index"},"spec":{"application":"openshift-pipelines-index-4-14-1-21"}},{"metadata":{"name":"extra-component"},"spec":{"application":"openshift-pipelines-extra-1-21"}}]}'
+    elif [[ "${OCR_TEST_OC_SCENARIO:-}" == config_missing_component ]]; then
+      # core app has controller but is missing webhook; index is OK
+      printf '%s\n' '{"items":[{"metadata":{"name":"controller"},"spec":{"application":"openshift-pipelines-core-1-21"}},{"metadata":{"name":"index"},"spec":{"application":"openshift-pipelines-index-4-14-1-21"}}]}'
     else
       printf '{"items":[]}\n'
     fi
