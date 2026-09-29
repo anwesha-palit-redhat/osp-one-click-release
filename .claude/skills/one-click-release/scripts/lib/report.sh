@@ -110,6 +110,6 @@ ocr_state_blocking_step() {
   [[ -f "${state_file}" ]] || return 1
   local blocking_step
   blocking_step=$(sed -n 's/^BLOCKING_STEP=//p' "${state_file}")
-  [[ "${blocking_step}" =~ ^[1-4]\.[0-9]+$ ]] || return 1
+  [[ "${blocking_step}" =~ ^[1-4]\.[0-9]+[a-z]?$ ]] || return 1
   printf '%s\n' "${blocking_step}"
 }

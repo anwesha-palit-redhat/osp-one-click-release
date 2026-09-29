@@ -12,7 +12,7 @@ source "${SCRIPTS_DIR}/lib/report.sh"
 source "${SCRIPTS_DIR}/lib/stage-runner.sh"
 
 STAGE_NAME=config
-STAGE_STEPS=(1.1 1.2 1.3 1.4 1.5 1.6 1.7 1.8 1.9 1.10 1.11 1.12)
+STAGE_STEPS=(1.1 1.2 1.3 1.4 1.5 1.6 1.7 1.8a 1.8b 1.9 1.10 1.11 1.12)
 
 ocr_describe_action() {
   case "$1" in
@@ -23,7 +23,8 @@ ocr_describe_action() {
     1.5) printf 'Manual action: create and merge the RPA GitLab MR.\n' ;;
     1.6) printf 'Manual action: create and merge the Pyxis GitLab MR if needed.\n' ;;
     1.7) printf 'Create an operator project.yaml version-bump PR.\n' ;;
-    1.8) printf 'Process OPC component-version PRs or create the OPC version-bump PR.\n' ;;
+    1.8a) printf 'Process open OPC component-version update PRs (merge, rebase, or report).\n' ;;
+    1.8b) printf 'Create or update the OPC version-bump PR for version.json.\n' ;;
     1.9) printf 'Manual action: synchronize p12n-opc upstream/.\n' ;;
     1.10) printf 'Merge or create the serve-tkn-cli submodule update PR.\n' ;;
     1.11) printf 'Manual action: create the product version GitLab MR.\n' ;;
@@ -328,38 +329,70 @@ pr_checks_ready() {
   [[ "${mergeable}" != CONFLICTING && "${state}" != DIRTY && ${failures} -eq 0 && ${pending} -eq 0 ]]
 }
 
-execute_1_8() {
-  local prs count url state versions current temp branch mismatches non_opc branch_rc
-  prs=$(gh pr list --repo openshift-pipelines/opc --base "${RELEASE_BRANCH}" --state open \
-    --search 'Update component versions in:title' --json url,mergeStateStatus)
-  local opc_bump
-  opc_bump=$(gh pr list --repo openshift-pipelines/opc --head "release/${VERSION}/opc-version-bump" --state open \
-    --json url,mergeStateStatus)
-  prs=$(jq -s 'add | unique_by(.url)' <(printf '%s\n' "${prs}") <(printf '%s\n' "${opc_bump}"))
-  count=$(jq length <<<"${prs}")
-  if ((count > 0)); then
-    while IFS= read -r url; do
-      state=$(gh pr view "${url}" --json mergeStateStatus --jq '.mergeStateStatus')
-      if [[ "${state}" == BEHIND ]]; then
-        gh pr update-branch "${url}" --rebase
-      elif pr_checks_ready "${url}"; then
+execute_1_8a() {
+  local pr_file number url pr_status has_action=false failing_checks
+  pr_file="${REPORT_BASE}/.state/opc-component-prs.tsv"
+  if [[ ! -s "${pr_file}" ]]; then
+    printf 'No open component update PRs to process.\n'
+    return
+  fi
+  while IFS=$'\t' read -r number url pr_status; do
+    case "${pr_status}" in
+      READY_TO_MERGE)
+        printf 'PR #%s is ready — adding labels, approving, enabling auto-merge.\n' "${number}"
         gh pr edit "${url}" --add-label lgtm,approved,one-click-release
         gh pr review --approve "${url}"
         gh pr merge "${url}" -d -r --auto
-      else
-        printf 'PR is not ready to merge: %s\n' "${url}" >&2
+        has_action=true
+        ;;
+      BEHIND)
+        printf 'PR #%s is behind — rebasing.\n' "${number}"
+        gh pr update-branch "${url}" --rebase
+        has_action=true
+        ;;
+      CI_FAILING)
+        failing_checks=$(gh pr view "${url}" --json statusCheckRollup \
+          --jq '[.statusCheckRollup[]? | select((.conclusion // "") != "" and (.conclusion | IN("SUCCESS","NEUTRAL","SKIPPED") | not)) | .name] | join(", ")')
+        printf 'MANUAL: PR #%s has failing CI checks: %s\n' "${number}" "${failing_checks}" >&2
+        printf 'Review and fix the failures, then re-run.\n' >&2
+        return 1
+        ;;
+      CI_PENDING)
+        printf 'BLOCKED: PR #%s has pending CI checks — wait for completion.\n' "${number}" >&2
         return 2
-      fi
-    done < <(jq -r '.[].url' <<<"${prs}")
-    return
+        ;;
+      CONFLICT)
+        printf 'MANUAL: PR #%s has merge conflicts — resolve manually.\n' "${number}" >&2
+        return 1
+        ;;
+      *)
+        printf 'PR #%s has unknown status %s.\n' "${number}" "${pr_status}" >&2
+        return 2
+        ;;
+    esac
+  done <"${pr_file}"
+  if [[ "${has_action}" == true ]]; then
+    printf 'All open PRs processed.\n'
   fi
+}
 
-  mismatches=$(<"${REPORT_BASE}/.state/opc-version-mismatches")
+execute_1_8b() {
+  local mismatches non_opc versions current temp branch branch_rc
+  if [[ -s "${REPORT_BASE}/.state/opc-version-mismatches" ]]; then
+    mismatches=$(<"${REPORT_BASE}/.state/opc-version-mismatches")
+  else
+    mismatches=''
+  fi
   non_opc=$(sed -E 's/[[:space:]]+opc:[^[:space:]]+//g; s/^[[:space:]]+|[[:space:]]+$//g' <<<"${mismatches}")
   if [[ -n "${non_opc}" ]]; then
-    printf 'BLOCKED: non-OPC component versions are outdated and must be updated first:%s\n' "${non_opc}" >&2
-    printf 'Resolve these manually (may require go.mod/vendor updates) then re-run verify.\n' >&2
-    return 2
+    printf 'MANUAL: non-OPC component versions are outdated:%s\n' "${non_opc}" >&2
+    printf 'For each outdated component, update manually:\n' >&2
+    printf '  1. cd <opc-checkout>\n' >&2
+    printf '  2. go get <module>@v<latest-version>\n' >&2
+    printf '  3. go mod tidy\n' >&2
+    printf '  4. go mod vendor\n' >&2
+    printf '  5. Commit and create a PR against %s\n' "${RELEASE_BRANCH}" >&2
+    return 1
   fi
   versions=$(gh_content "repos/openshift-pipelines/opc/contents/pkg/version.json?ref=${RELEASE_BRANCH}")
   current=$(jq -r '.opc // empty' <<<"${versions}")
@@ -466,7 +499,8 @@ execute_1_12() { manual_action "MANUAL: copy and update CDN RP/RPA resources for
 ocr_execute_step() {
   case "$1" in
     1.1) execute_1_1 ;; 1.2) execute_1_2 ;; 1.3) execute_1_3 ;; 1.4) execute_1_4 ;;
-    1.5) execute_1_5 ;; 1.6) execute_1_6 ;; 1.7) execute_1_7 ;; 1.8) execute_1_8 ;;
+    1.5) execute_1_5 ;; 1.6) execute_1_6 ;; 1.7) execute_1_7 ;;
+    1.8a) execute_1_8a ;; 1.8b) execute_1_8b ;;
     1.9) execute_1_9 ;; 1.10) execute_1_10 ;; 1.11) execute_1_11 ;; 1.12) execute_1_12 ;;
   esac
 }
