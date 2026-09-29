@@ -375,5 +375,13 @@ fi
 assert_eq '2' "$(run_rc "${SCRIPTS_DIR}/one-click-release.sh" verify 1.21.3 --stage config)" 'verify without --skip is unchanged (backward compatible)'
 if grep -q '^| 1.1 | Create new patch version | ACTION NEEDED |' "${skip_report}"; then pass 'without --skip step 1.1 is checked normally'; else fail 'without --skip step 1.1 is checked normally'; fi
 
+# --skip flag tests for execute
+: >"${OCR_TEST_COMMAND_LOG}"
+assert_eq '3' "$(run_rc "${SCRIPTS_DIR}/one-click-release.sh" execute 1.21.3 --stage config --step 1.2 --skip 1.1)" 'execute accepts --skip flag without usage error'
+: >"${OCR_TEST_COMMAND_LOG}"
+assert_eq '3' "$(run_rc "${SCRIPTS_DIR}/one-click-release.sh" execute 1.21.3 --stage config --step 1.2 --skip 1.1,1.3)" 'execute accepts --skip with comma-separated list'
+: >"${OCR_TEST_COMMAND_LOG}"
+assert_eq '2' "$(run_rc "${SCRIPTS_DIR}/one-click-release.sh" execute 1.21.3 --stage config --step 1.1)" 'execute without --skip is unchanged (backward compatible)'
+
 printf '\n%d passed, %d failed\n' "${PASS}" "${FAIL}"
 ((FAIL == 0))
