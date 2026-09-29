@@ -274,6 +274,36 @@ else:
 "
 ```
 
+**Verify (patch version):**
+
+Check 1 — CDN RPA `productVersionName` matches `VERSION`:
+```bash
+curl -s --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+  "$GITLAB_URL/api/v4/projects/releng%2Fkonflux-release-data/repository/files/config%2Fkflux-prd-rh02.0fk9.p1%2Fproduct%2FReleasePlanAdmission%2Ftekton-ecosystem%2Fopenshift-pipelines-${MM_DASHED}-core-cdn-prod.yaml/raw?ref=main" \
+  2>/dev/null | python3 -c "
+import sys, yaml
+content = yaml.safe_load(sys.stdin)
+expected = '${VERSION}'
+actual = content.get('spec',{}).get('data',{}).get('productVersionName','')
+if actual == expected:
+    print(f'CDN RPA productVersionName: {actual} ✓')
+else:
+    print(f'CDN_RPA_PATCH_MISMATCH: expected {expected}, found {actual}')
+"
+```
+
+Check 2 — Developer-portal version file exists:
+```bash
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+  "$GITLAB_URL/api/v4/projects/releng%2Fkonflux-release-data/repository/files/data%2Fexternal%2Fdeveloper-portal%2Fopenshift-pipelines%2F${VERSION}.yaml/raw?ref=main" \
+  2>/dev/null)
+if [ "$HTTP_CODE" = "200" ]; then
+    echo "Developer-portal version file: ${VERSION}.yaml ✓"
+else
+    echo "DEV_PORTAL_FILE_MISSING: ${VERSION}.yaml (HTTP ${HTTP_CODE})"
+fi
+```
+
 **Fallback if no GitLab token:**
 ```bash
 gh search code "openshift-pipelines" \
@@ -288,7 +318,7 @@ for m in sorted(matches):
 "
 ```
 
-**Expected when DONE:** RPA files exist for core, bundle, fbc, cdn.
+**Expected when DONE:** RPA files exist for core, bundle, fbc, cdn. CDN RPAs have correct `productVersionName`. Developer-portal version file exists.
 
 **Collect links:** If RPA files exist, report as DONE with the count. If a GitLab MR was used, capture its URL:
 ```bash
@@ -311,9 +341,30 @@ else:
 
 Report the GitLab MR URL (if found) in the summary.
 
-**If not found — Execute:** MANUAL. Copy RPAs from hack repo `.konflux/` directory to konflux-release-data GitLab repo via merge request.
+**If `NO_RPA_FOUND` (first minor version release) — Execute:** MANUAL. Copy RPAs from hack repo `.konflux/` directory to konflux-release-data GitLab repo via merge request.
 
 Reference MR: `https://gitlab.cee.redhat.com/releng/konflux-release-data/-/merge_requests/10083/diffs`
+
+**If `CDN_RPA_PATCH_MISMATCH` or `DEV_PORTAL_FILE_MISSING` — Execute (requires approval):**
+
+1. Fork `releng/konflux-release-data` on GitLab (or use existing fork)
+2. Create branch: `openshift-pipelines-${VERSION}-rpa-update`
+3. Update `productVersionName` in both CDN RPA files:
+   - `openshift-pipelines-${MM_DASHED}-core-cdn-prod.yaml`
+   - `openshift-pipelines-${MM_DASHED}-core-cdn-stage.yaml`
+   Change: `productVersionName: "${PREVIOUS_VERSION}"` → `productVersionName: "${VERSION}"`
+4. Create `data/external/developer-portal/openshift-pipelines/${VERSION}.yaml`:
+   Copy previous patch's file, update `versionName` to `"${VERSION}"` and `releaseDate` to today's date
+5. Commit: `Update RPA and developer-portal for openshift-pipelines ${VERSION}`
+6. Push to fork, open MR to `releng/konflux-release-data` main branch via GitLab API:
+```bash
+curl -s --request POST --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+  "$GITLAB_URL/api/v4/projects/${FORK_PROJECT_ID}/merge_requests" \
+  --data-urlencode "source_branch=openshift-pipelines-${VERSION}-rpa-update" \
+  --data-urlencode "target_branch=main" \
+  --data-urlencode "target_project_id=${TARGET_PROJECT_ID}" \
+  --data-urlencode "title=Update RPA and developer-portal for openshift-pipelines ${VERSION}"
+```
 
 ---
 
@@ -360,7 +411,20 @@ else:
 
 Report the GitLab MR URL (if found) in the summary.
 
-**If not found — Execute:** MANUAL. Copy Pyxis configuration from hack repo to `https://gitlab.cee.redhat.com/releng/pyxis-repo-configs/`.
+**If `NO_PYXIS_CONFIG_FOUND` — Execute (requires approval):**
+
+> **Note:** `pyxis-repo-configs` requires MRs from origin branches (not forks). This requires a GitLab token with push access to `releng/pyxis-repo-configs`.
+
+If push access is available:
+1. Clone `releng/pyxis-repo-configs`
+2. Create branch: `openshift-pipelines-pyxis-config`
+3. Copy Pyxis config from hack repo to `products/openshift-pipelines/`
+4. Commit, push to origin branch
+5. Open MR via GitLab API
+
+If no push access:
+   MANUAL. Copy Pyxis configuration from hack repo to `https://gitlab.cee.redhat.com/releng/pyxis-repo-configs/`.
+   Request push access from the repo owner to automate this step in future.
 
 ---
 
