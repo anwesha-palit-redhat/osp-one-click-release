@@ -122,16 +122,31 @@ verify_1_4() {
   printf '%s\n' "${apps}" >"${temp}/apps.json"
   printf '%s\n' "${components}" >"${temp}/components.json"
   : >"${temp}/expected.tsv"
-  local dir cluster_app expected_components
+  local dir cluster_app expected_components comp_dirs comp_dir yaml_files yaml_file comp_name
   while IFS= read -r dir; do
     [[ -n "${dir}" ]] || continue
     cluster_app="${dir//./-}-${MM_DASHED}"
-    if ! expected_components=$(gh api "repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/${MM_DASHED}/${dir}" \
+    # List component subdirectories within this application directory
+    if ! comp_dirs=$(gh api "repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/${MM_DASHED}/${dir}" \
       --jq '[.[] | select(.type == "dir") | .name] | sort[]' 2>/dev/null); then
       rm -rf "${temp}"
       STEP_DETAILS="unable to list expected components for ${dir}"
       return "${OCR_RC_BLOCKED}"
     fi
+    # Extract metadata.name from component YAML files inside each subdirectory
+    # instead of using directory names, which differ from actual component names
+    expected_components=''
+    while IFS= read -r comp_dir; do
+      [[ -n "${comp_dir}" ]] || continue
+      yaml_files=$(gh api "repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/${MM_DASHED}/${dir}/${comp_dir}" \
+        --jq '[.[] | select(.type == "file" and (.name | test("^component-.*\\.yaml$"))) | .path] | .[]' 2>/dev/null) || continue
+      while IFS= read -r yaml_file; do
+        [[ -n "${yaml_file}" ]] || continue
+        comp_name=$(gh_content "repos/openshift-pipelines/hack/contents/${yaml_file}" | awk '/^  name:/{print $2; exit}')
+        [[ -n "${comp_name}" ]] && expected_components+="${comp_name}"$'\n'
+      done <<<"${yaml_files}"
+    done <<<"${comp_dirs}"
+    expected_components=$(sort <<<"${expected_components}" | sed '/^$/d')
     printf '%s\t%s\t%s\n' "${dir}" "${cluster_app}" "$(paste -sd, - <<<"${expected_components}")" >>"${temp}/expected.tsv"
   done <<<"${expected}"
   result=$(
