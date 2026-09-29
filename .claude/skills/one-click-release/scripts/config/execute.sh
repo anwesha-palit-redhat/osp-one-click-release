@@ -92,43 +92,19 @@ execute_1_5() {
   fi
 
   # Minor-version RPAs exist but patch content needs updating
-  # Clone fork, update CDN RPAs and create developer-portal file, open MR
-  local temp branch fork_project_id target_project_id mr_url gitlab_username
+  # Clone main repo, update CDN RPAs and create developer-portal file, open MR
+  local temp branch project_id mr_url
   temp=$(mktemp -d)
   trap 'rm -rf "${temp}"' RETURN
 
-  # 1. Resolve the GitLab username
-  gitlab_username="${GITLAB_USER:-}"
-  if [[ -z "${gitlab_username}" ]]; then
-    gitlab_username=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-      "${GITLAB_URL}/api/v4/user" | jq -r '.username // empty')
-  fi
-  if [[ -z "${gitlab_username}" ]]; then
-    printf 'Unable to determine GitLab username. Set GITLAB_USER or check GITLAB_TOKEN.\n' >&2
-    rm -rf "${temp}"; trap - RETURN
-    manual_action 'MANUAL: update CDN RPA productVersionName and create developer-portal version file via a GitLab MR.'
-    return
-  fi
-  printf 'Resolved GitLab username: %s\n' "${gitlab_username}"
-
-  # 2. Ensure a fork exists (create one if needed; idempotent)
-  printf 'Ensuring fork of konflux-release-data exists...\n'
-  curl -s --request POST --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-    "${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data/fork" >/dev/null 2>&1 || true
-  sleep 2
-
-  # 3. Clone the user's fork (not the main repo)
-  printf 'Cloning fork: %s/konflux-release-data...\n' "${gitlab_username}"
-  git clone --depth 1 "https://oauth2:${GITLAB_TOKEN}@${GITLAB_URL#https://}/${gitlab_username}/konflux-release-data.git" "${temp}/krd" 2>/dev/null || {
-    printf 'Unable to clone fork at %s/konflux-release-data.\n' "${gitlab_username}" >&2
+  # Clone the main repo directly (contributors have push access)
+  printf 'Cloning releng/konflux-release-data...\n'
+  git clone --depth 1 "https://oauth2:${GITLAB_TOKEN}@${GITLAB_URL#https://}/releng/konflux-release-data.git" "${temp}/krd" 2>/dev/null || {
+    printf 'Unable to clone releng/konflux-release-data.\n' >&2
     rm -rf "${temp}"; trap - RETURN
     manual_action 'MANUAL: update CDN RPA productVersionName and create developer-portal version file via a GitLab MR.'
     return
   }
-
-  # 4. Add upstream remote for reference
-  git -C "${temp}/krd" remote add upstream \
-    "https://oauth2:${GITLAB_TOKEN}@${GITLAB_URL#https://}/releng/konflux-release-data.git" 2>/dev/null || true
 
   branch="openshift-pipelines-${VERSION}-rpa-update"
   (
@@ -190,7 +166,6 @@ EOF
 
     git add -A
     git commit -m "Update RPA and developer-portal for openshift-pipelines ${VERSION}"
-    # 5. Push to origin — which now points to the fork, not the main repo
     git push origin "${branch}" 2>/dev/null
   ) || {
     printf 'Failed to prepare and push branch.\n' >&2
@@ -199,21 +174,16 @@ EOF
     return
   }
 
-  # 6. Open MR via GitLab API using the fork as source
-  # Look up the fork project ID reliably via the username-based path
-  fork_project_id=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-    "${GITLAB_URL}/api/v4/projects/${gitlab_username}%2Fkonflux-release-data" \
-    | jq -r '.id // empty')
-  target_project_id=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+  # Open MR via GitLab API — branch was pushed directly to the main repo
+  project_id=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
     "${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data" \
     | jq -r '.id // empty')
 
-  if [[ -n "${fork_project_id}" && -n "${target_project_id}" ]]; then
+  if [[ -n "${project_id}" ]]; then
     mr_url=$(curl -s --request POST --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-      "${GITLAB_URL}/api/v4/projects/${fork_project_id}/merge_requests" \
+      "${GITLAB_URL}/api/v4/projects/${project_id}/merge_requests" \
       --data-urlencode "source_branch=${branch}" \
       --data-urlencode "target_branch=main" \
-      --data-urlencode "target_project_id=${target_project_id}" \
       --data-urlencode "title=Update RPA and developer-portal for openshift-pipelines ${VERSION}" \
       | jq -r '.web_url // empty')
     if [[ -n "${mr_url}" ]]; then
@@ -222,7 +192,7 @@ EOF
       printf 'MR creation failed. Push succeeded — create MR manually from branch %s.\n' "${branch}" >&2
     fi
   else
-    printf 'Could not determine project IDs. Create MR manually from branch %s.\n' "${branch}" >&2
+    printf 'Could not determine project ID. Create MR manually from branch %s.\n' "${branch}" >&2
   fi
 
   rm -rf "${temp}"
