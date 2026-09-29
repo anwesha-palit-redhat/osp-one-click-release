@@ -18,7 +18,9 @@ case " $* " in
   *" workflow run "*) exit 0 ;;
   *" run list "*) printf '[]\n' ;;
   *" pr list "*)
-    if [[ "${OCR_TEST_GH_SCENARIO:-}" == patch_pr ]]; then
+    if [[ "${OCR_TEST_GH_SCENARIO:-}" == config_match || "${OCR_TEST_GH_SCENARIO:-}" == config_missing_app || "${OCR_TEST_GH_SCENARIO:-}" == config_component_api_fail ]]; then
+      printf '[{"number":42,"url":"https://github.com/openshift-pipelines/hack/pull/42","state":"MERGED","mergedAt":"2026-09-28T10:00:00Z"}]\n'
+    elif [[ "${OCR_TEST_GH_SCENARIO:-}" == patch_pr ]]; then
       printf '[{"number":42,"url":"https://github.com/openshift-pipelines/hack/pull/42","state":"OPEN","mergedAt":null}]\n'
     else
       printf '[]\n'
@@ -26,7 +28,20 @@ case " $* " in
     ;;
   *" search prs "*) printf '[]\n' ;;
   *" api repos/openshift-pipelines/hack/contents/config/downstream/releases/1.21.yaml "*)
-    printf '%s' $'release-tag: 1.21.2\ncode-freeze: false\n' | base64
+    if [[ "${OCR_TEST_GH_SCENARIO:-}" == config_match || "${OCR_TEST_GH_SCENARIO:-}" == config_missing_app || "${OCR_TEST_GH_SCENARIO:-}" == config_component_api_fail ]]; then
+      printf '%s' $'release-tag: 1.21.3\ncode-freeze: false\n' | base64
+    else
+      printf '%s' $'release-tag: 1.21.2\ncode-freeze: false\n' | base64
+    fi
+    ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-core "*)
+    printf 'controller\nwebhook\n'
+    ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-index-4.14 "*)
+    if [[ "${OCR_TEST_GH_SCENARIO:-}" == config_component_api_fail ]]; then exit 1; else printf 'index\n'; fi
+    ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21 "*)
+    printf 'openshift-pipelines-core\nopenshift-pipelines-index-4.14\n'
     ;;
   *" api repos/openshift-pipelines/operator/compare/old...new "*)
     if [[ "${OCR_TEST_GH_SCENARIO:-}" == generated_good ]]; then
