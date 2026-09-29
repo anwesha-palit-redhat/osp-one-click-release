@@ -34,11 +34,36 @@ case " $* " in
       printf '%s' $'release-tag: 1.21.2\ncode-freeze: false\n' | base64
     fi
     ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-core/operator/component-controller-1.21.yaml "*)
+    # Component YAML content: directory name "operator" differs from metadata.name "controller"
+    printf '%s' $'apiVersion: appstudio.redhat.com/v1alpha1\nkind: Component\nmetadata:\n  name: controller\nspec:\n  componentName: controller\n  application: openshift-pipelines-core-1-21\n' | base64
+    ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-core/pac/component-webhook-1.21.yaml "*)
+    # Component YAML content: directory name "pac" differs from metadata.name "webhook"
+    printf '%s' $'apiVersion: appstudio.redhat.com/v1alpha1\nkind: Component\nmetadata:\n  name: webhook\nspec:\n  componentName: webhook\n  application: openshift-pipelines-core-1-21\n' | base64
+    ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-core/operator "*)
+    # List YAML files in operator subdirectory (returns file paths)
+    printf '.konflux/openshift-pipelines/1-21/openshift-pipelines-core/operator/component-controller-1.21.yaml\n'
+    ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-core/pac "*)
+    # List YAML files in pac subdirectory (returns file paths)
+    printf '.konflux/openshift-pipelines/1-21/openshift-pipelines-core/pac/component-webhook-1.21.yaml\n'
+    ;;
   *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-core "*)
-    printf 'controller\nwebhook\n'
+    # Component subdirectories — names intentionally differ from metadata.name
+    printf 'operator\npac\n'
+    ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-index-4.14/fbc/component-index-1.21.yaml "*)
+    # Component YAML content: directory name "fbc" differs from metadata.name "index"
+    printf '%s' $'apiVersion: appstudio.redhat.com/v1alpha1\nkind: Component\nmetadata:\n  name: index\nspec:\n  componentName: index\n  application: openshift-pipelines-index-4-14-1-21\n' | base64
+    ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-index-4.14/fbc "*)
+    # List YAML files in fbc subdirectory (returns file paths)
+    printf '.konflux/openshift-pipelines/1-21/openshift-pipelines-index-4.14/fbc/component-index-1.21.yaml\n'
     ;;
   *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-index-4.14 "*)
-    if [[ "${OCR_TEST_GH_SCENARIO:-}" == config_component_api_fail ]]; then exit 1; else printf 'index\n'; fi
+    if [[ "${OCR_TEST_GH_SCENARIO:-}" == config_component_api_fail ]]; then exit 1; else printf 'fbc\n'; fi
     ;;
   *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21 "*)
     # Hack repo always defines the same 2 app directories regardless of scenario
