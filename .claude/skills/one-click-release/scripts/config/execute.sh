@@ -92,24 +92,18 @@ execute_1_5() {
   fi
 
   # Minor-version RPAs exist but patch content needs updating
-  # Clone fork, update CDN RPAs and create developer-portal file, open MR
-  local temp branch fork_project_id target_project_id mr_url
+  # Clone main repo, update CDN RPAs and create developer-portal file, open MR
+  local temp branch project_id mr_url
   temp=$(mktemp -d)
   trap 'rm -rf "${temp}"' RETURN
 
-  printf 'Cloning konflux-release-data fork...\n'
+  # Clone the main repo directly (contributors have push access)
+  printf 'Cloning releng/konflux-release-data...\n'
   git clone --depth 1 "https://oauth2:${GITLAB_TOKEN}@${GITLAB_URL#https://}/releng/konflux-release-data.git" "${temp}/krd" 2>/dev/null || {
-    # If clone fails (no fork access), try forking first
-    printf 'Direct clone failed. Creating fork...\n'
-    curl -s --request POST --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-      "${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data/fork" >/dev/null 2>&1 || true
-    sleep 2
-    git clone --depth 1 "https://oauth2:${GITLAB_TOKEN}@${GITLAB_URL#https://}/${GITLAB_USER:-$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "${GITLAB_URL}/api/v4/user" | jq -r .username)}/konflux-release-data.git" "${temp}/krd" 2>/dev/null || {
-      printf 'Unable to clone konflux-release-data fork.\n' >&2
-      rm -rf "${temp}"; trap - RETURN
-      manual_action 'MANUAL: update CDN RPA productVersionName and create developer-portal version file via a GitLab MR.'
-      return
-    }
+    printf 'Unable to clone releng/konflux-release-data.\n' >&2
+    rm -rf "${temp}"; trap - RETURN
+    manual_action 'MANUAL: update CDN RPA productVersionName and create developer-portal version file via a GitLab MR.'
+    return
   }
 
   branch="openshift-pipelines-${VERSION}-rpa-update"
@@ -156,9 +150,10 @@ print(content.get('spec',{}).get('data',{}).get('mapping',{}).get('components',[
       cp "${prev_portal}" "${portal_dir}/${VERSION}.yaml"
       sed_i "s/versionName: .*/versionName: \"${VERSION}\"/" "${portal_dir}/${VERSION}.yaml"
       sed_i "s/releaseDate: .*/releaseDate: \"${release_date}\"/" "${portal_dir}/${VERSION}.yaml"
+      sed_i "s/ga: .*/ga: true/" "${portal_dir}/${VERSION}.yaml"
     else
       cat > "${portal_dir}/${VERSION}.yaml" <<EOF
-# Generated for openshift-pipelines ${VERSION}
+# Generated for Konflux Application openshift-pipelines-core by openshift-pipelines/hack. DO NOT EDIT
 ---
 versionName: "${VERSION}"
 ga: true
@@ -172,7 +167,7 @@ EOF
 
     git add -A
     git commit -m "Update RPA and developer-portal for openshift-pipelines ${VERSION}"
-    git push origin "${branch}" 2>/dev/null
+    git push -f origin "${branch}" 2>/dev/null
   ) || {
     printf 'Failed to prepare and push branch.\n' >&2
     rm -rf "${temp}"; trap - RETURN
@@ -180,21 +175,16 @@ EOF
     return
   }
 
-  # Open MR via GitLab API
-  # Get project IDs
-  fork_project_id=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-    "${GITLAB_URL}/api/v4/projects?search=konflux-release-data&owned=true&per_page=5" \
-    | jq -r '.[0].id // empty')
-  target_project_id=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+  # Open MR via GitLab API — branch was pushed directly to the main repo
+  project_id=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
     "${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data" \
     | jq -r '.id // empty')
 
-  if [[ -n "${fork_project_id}" && -n "${target_project_id}" ]]; then
+  if [[ -n "${project_id}" ]]; then
     mr_url=$(curl -s --request POST --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-      "${GITLAB_URL}/api/v4/projects/${fork_project_id}/merge_requests" \
+      "${GITLAB_URL}/api/v4/projects/${project_id}/merge_requests" \
       --data-urlencode "source_branch=${branch}" \
       --data-urlencode "target_branch=main" \
-      --data-urlencode "target_project_id=${target_project_id}" \
       --data-urlencode "title=Update RPA and developer-portal for openshift-pipelines ${VERSION}" \
       | jq -r '.web_url // empty')
     if [[ -n "${mr_url}" ]]; then
@@ -203,7 +193,7 @@ EOF
       printf 'MR creation failed. Push succeeded — create MR manually from branch %s.\n' "${branch}" >&2
     fi
   else
-    printf 'Could not determine project IDs. Create MR manually from branch %s.\n' "${branch}" >&2
+    printf 'Could not determine project ID. Create MR manually from branch %s.\n' "${branch}" >&2
   fi
 
   rm -rf "${temp}"
