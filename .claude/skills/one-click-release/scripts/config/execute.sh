@@ -135,6 +135,17 @@ print(content.get('spec',{}).get('data',{}).get('mapping',{}).get('components',[
       fi
     done
 
+    # Prompt for developer-portal release date
+    local release_date
+    while true; do
+      printf 'Enter release date (YYYY-MM-DD): ' >&2
+      read -r release_date
+      if [[ "${release_date}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        break
+      fi
+      printf 'Invalid format. Please use YYYY-MM-DD (e.g. 2026-10-15).\n' >&2
+    done
+
     # Create developer-portal version file
     local portal_dir="data/external/developer-portal/openshift-pipelines"
     mkdir -p "${portal_dir}"
@@ -144,7 +155,7 @@ print(content.get('spec',{}).get('data',{}).get('mapping',{}).get('components',[
     if [[ -n "${prev_portal}" ]]; then
       cp "${prev_portal}" "${portal_dir}/${VERSION}.yaml"
       sed_i "s/versionName: .*/versionName: \"${VERSION}\"/" "${portal_dir}/${VERSION}.yaml"
-      sed_i "s/releaseDate: .*/releaseDate: \"$(date -u +%Y-%m-%d)\"/" "${portal_dir}/${VERSION}.yaml"
+      sed_i "s/releaseDate: .*/releaseDate: \"${release_date}\"/" "${portal_dir}/${VERSION}.yaml"
     else
       cat > "${portal_dir}/${VERSION}.yaml" <<EOF
 # Generated for openshift-pipelines ${VERSION}
@@ -154,7 +165,7 @@ ga: true
 termsAndConditions: "Anonymous Download"
 hidden: false
 invisible: false
-releaseDate: "$(date -u +%Y-%m-%d)"
+releaseDate: "${release_date}"
 EOF
     fi
     printf 'Created developer-portal version file: %s.yaml\n' "${VERSION}"
