@@ -7,6 +7,17 @@ OCR_RC_BLOCKED=10
 OCR_RC_SKIPPED=20
 OCR_KONFLUX_NS="tekton-ecosystem-tenant"
 
+# Portable in-place sed that works on both GNU sed (Linux) and BSD sed (macOS).
+# BSD sed requires an explicit backup extension argument after -i; GNU sed does not.
+# Usage: sed_i "s/old/new/" file  (same arguments as sed -i)
+sed_i() {
+  if sed --version 2>/dev/null | grep -q GNU; then
+    sed -i "$@"
+  else
+    sed -i '' "$@"
+  fi
+}
+
 ocr_load_env_file() {
   local path=$1 line key value
   while IFS= read -r line || [[ -n "${line}" ]]; do

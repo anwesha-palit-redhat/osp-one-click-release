@@ -130,7 +130,7 @@ import sys, yaml
 content = yaml.safe_load(open(sys.argv[1]))
 print(content.get('spec',{}).get('data',{}).get('productVersionName',''))
 " "${cdn_file}" 2>/dev/null || true)
-        sed -i "s/productVersionName: \"${prev_version}\"/productVersionName: \"${VERSION}\"/" "${cdn_file}"
+        sed_i "s/productVersionName: \"${prev_version}\"/productVersionName: \"${VERSION}\"/" "${cdn_file}"
         printf 'Updated %s: %s → %s\n' "$(basename "${cdn_file}")" "${prev_version}" "${VERSION}"
       fi
     done
@@ -143,8 +143,8 @@ print(content.get('spec',{}).get('data',{}).get('productVersionName',''))
     prev_portal=$(find "${portal_dir}" -maxdepth 1 -name '*.yaml' 2>/dev/null | sort -V | tail -1 || true)
     if [[ -n "${prev_portal}" ]]; then
       cp "${prev_portal}" "${portal_dir}/${VERSION}.yaml"
-      sed -i "s/versionName: .*/versionName: \"${VERSION}\"/" "${portal_dir}/${VERSION}.yaml"
-      sed -i "s/releaseDate: .*/releaseDate: \"$(date -u +%Y-%m-%d)\"/" "${portal_dir}/${VERSION}.yaml"
+      sed_i "s/versionName: .*/versionName: \"${VERSION}\"/" "${portal_dir}/${VERSION}.yaml"
+      sed_i "s/releaseDate: .*/releaseDate: \"$(date -u +%Y-%m-%d)\"/" "${portal_dir}/${VERSION}.yaml"
     else
       cat > "${portal_dir}/${VERSION}.yaml" <<EOF
 # Generated for openshift-pipelines ${VERSION}
@@ -300,8 +300,8 @@ execute_1_7() {
   git clone --depth 1 -b "${RELEASE_BRANCH}" https://github.com/openshift-pipelines/operator.git "${temp}/operator"
   (
     cd "${temp}/operator"
-    sed -i "s/current: ${current}/current: ${VERSION}/" project.yaml
-    sed -i "s/previous: ${previous}/previous: ${current}/" project.yaml
+    sed_i "s/current: ${current}/current: ${VERSION}/" project.yaml
+    sed_i "s/previous: ${previous}/previous: ${current}/" project.yaml
     git config user.name "${GITHUB_USER:-One Click Release Bot}"
     git config user.email "${GITHUB_EMAIL:-one-click-release-bot@redhat.com}"
     git checkout -b "${branch}"
@@ -441,7 +441,7 @@ execute_1_10() {
   git clone -b "${RELEASE_BRANCH}" https://github.com/openshift-pipelines/serve-tkn-cli.git "${temp}/serve-tkn-cli"
   (
     cd "${temp}/serve-tkn-cli"
-    sed -i "/sources\/cli/,/branch =/{s|branch = .*|branch = ${cli_upstream}|}" .gitmodules
+    sed_i "/sources\/cli/,/branch =/{s|branch = .*|branch = ${cli_upstream}|}" .gitmodules
     git submodule update --init --remote --force --checkout
     git config user.name "${GITHUB_USER:-One Click Release Bot}"
     git config user.email "${GITHUB_EMAIL:-one-click-release-bot@redhat.com}"

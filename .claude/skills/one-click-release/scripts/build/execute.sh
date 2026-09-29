@@ -202,7 +202,7 @@ consolidate_conflicting_nudges() {
           image=$(sed -E 's#^\+.*[[:space:]]([^[:space:]]+)@sha256:[a-f0-9]{64}.*#\1#' <<<"${line}")
           digest=$(grep -oE '@sha256:[a-f0-9]{64}' <<<"${line}" | head -1 | cut -d: -f2)
           [[ -n "${image}" && -n "${digest}" ]] || continue
-          sed -i -E "s#(${image}@sha256:)[a-f0-9]{64}#\\1${digest}#g" project.yaml
+          sed_i -E "s#(${image}@sha256:)[a-f0-9]{64}#\\1${digest}#g" project.yaml
         done < <(grep -E '^\+.*@sha256:[a-f0-9]{64}' <<<"${diff}")
       done < <(jq -r '.[].number' <<<"${prs}")
       git diff --quiet project.yaml && {
@@ -451,7 +451,7 @@ execute_2_9() {
   git clone --depth 1 https://github.com/openshift-pipelines/hack.git "${temp}/hack"
   (
     cd "${temp}/hack"
-    sed -i 's/code-freeze: false/code-freeze: true/' "config/downstream/releases/${MAJOR_MINOR}.yaml"
+    sed_i 's/code-freeze: false/code-freeze: true/' "config/downstream/releases/${MAJOR_MINOR}.yaml"
     git diff --quiet && {
       printf 'code-freeze is already true or field missing.\n'
       exit 0
