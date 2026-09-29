@@ -128,9 +128,9 @@ execute_1_5() {
         prev_version=$(python3 -c "
 import sys, yaml
 content = yaml.safe_load(open(sys.argv[1]))
-print(content.get('spec',{}).get('data',{}).get('productVersionName',''))
+print(content.get('spec',{}).get('data',{}).get('mapping',{}).get('components',[{}])[0].get('contentGateway',{}).get('productVersionName',''))
 " "${cdn_file}" 2>/dev/null || true)
-        sed_i "s/productVersionName: \"${prev_version}\"/productVersionName: \"${VERSION}\"/" "${cdn_file}"
+        sed_i "s/productVersionName: \".*\"/productVersionName: \"${VERSION}\"/" "${cdn_file}"
         printf 'Updated %s: %s → %s\n' "$(basename "${cdn_file}")" "${prev_version}" "${VERSION}"
       fi
     done

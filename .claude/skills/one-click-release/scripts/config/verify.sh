@@ -226,7 +226,7 @@ verify_1_5() {
   cdn_version=$(python3 -c "
 import sys, yaml
 content = yaml.safe_load(sys.stdin)
-print(content.get('spec',{}).get('data',{}).get('productVersionName',''))
+print(content.get('spec',{}).get('data',{}).get('mapping',{}).get('components',[{}])[0].get('contentGateway',{}).get('productVersionName',''))
 " <<<"${cdn_content}" 2>/dev/null || true)
   if [[ "${cdn_version}" != "${VERSION}" ]]; then
     STEP_DETAILS+="; CDN RPA productVersionName: ${cdn_version:-empty} (expected ${VERSION})"
