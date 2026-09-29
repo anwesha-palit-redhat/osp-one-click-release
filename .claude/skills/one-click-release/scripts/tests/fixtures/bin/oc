@@ -4,8 +4,19 @@ set -euo pipefail
 printf '%s\n' "$*" >>"${OCR_TEST_COMMAND_LOG:?}"
 case " $* " in
   *" get applications.appstudio.redhat.com "*)
-    if [[ "${OCR_TEST_OC_SCENARIO:-}" == image ]]; then
+    if [[ "${OCR_TEST_OC_SCENARIO:-}" == config_match ]]; then
+      printf '%s\n' '{"items":[{"metadata":{"name":"openshift-pipelines-core-1-21"}}]}'
+    elif [[ "${OCR_TEST_OC_SCENARIO:-}" == config_missing_app ]]; then
+      printf '%s\n' '{"items":[{"metadata":{"name":"openshift-pipelines-kore-1-21"}}]}'
+    elif [[ "${OCR_TEST_OC_SCENARIO:-}" == image ]]; then
       printf '%s\n' '{"items":[{"metadata":{"name":"openshift-pipelines-index-4-14-1-21"}}]}'
+    else
+      printf '{"items":[]}\n'
+    fi
+    ;;
+  *" get components "*)
+    if [[ "${OCR_TEST_OC_SCENARIO:-}" == config_match || "${OCR_TEST_OC_SCENARIO:-}" == config_missing_app ]]; then
+      printf '%s\n' '{"items":[{"metadata":{"name":"controller"},"spec":{"application":"openshift-pipelines-core-1-21"}},{"metadata":{"name":"webhook"},"spec":{"application":"openshift-pipelines-core-1-21"}}]}'
     else
       printf '{"items":[]}\n'
     fi

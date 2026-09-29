@@ -127,7 +127,7 @@ verify_1_4() {
     cluster_app="openshift-pipelines-${dir//./-}-${MM_DASHED}"
     expected_components=$(gh api "repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/${MM_DASHED}/${dir}" \
       --jq '[.[] | select(.type == "dir") | .name] | sort[]' 2>/dev/null || true)
-    printf '%s\t%s\t%s\n' "${dir}" "${cluster_app}" "$(paste -sd, <<<"${expected_components}")" >>"${temp}/expected.tsv"
+    printf '%s\t%s\t%s\n' "${dir}" "${cluster_app}" "$(paste -sd, - <<<"${expected_components}")" >>"${temp}/expected.tsv"
   done <<<"${expected}"
   result=$(
     python3 - "${temp}" "${REPORT_BASE}/.state/config-applications.tsv" <<'PY'

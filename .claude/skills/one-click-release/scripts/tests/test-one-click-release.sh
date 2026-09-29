@@ -4,6 +4,7 @@ set -euo pipefail
 
 TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SCRIPTS_DIR=$(cd "${TEST_DIR}/.." && pwd)
+CHECKOUT_ROOT=$(cd "${SCRIPTS_DIR}/../../../.." && pwd)
 FIXTURE_BIN="${TEST_DIR}/fixtures/bin"
 ORIGINAL_PATH=${PATH}
 PASS=0
@@ -27,6 +28,42 @@ assert_file() {
   local path=$1 message=$2
   if [[ -f "${path}" ]]; then pass "${message}"; else fail "${message} (${path} missing)"; fi
 }
+
+required_env=(
+  GITHUB_TOKEN GH_TOKEN GITHUB_USER GITHUB_EMAIL
+  KONFLUX_SERVER KONFLUX_TOKEN
+  GITLAB_URL GITLAB_TOKEN
+  JIRA_URL JIRA_EMAIL JIRA_TOKEN
+  JIRA_RN_TEXT_FIELD JIRA_RN_TYPE_FIELD JIRA_RN_STATUS_FIELD
+  QUAY_USER QUAY_PASSWORD
+)
+if bash -euo pipefail -c '
+  source "$1"
+  shift
+  for name in "$@"; do [[ -n "${!name}" ]]; done
+  [[ "${KONFLUX_SERVER}" == https://*.example.invalid ]]
+  [[ "${GITLAB_URL}" == https://*.example.invalid ]]
+  [[ "${JIRA_URL}" == https://*.example.invalid ]]
+' _ "${CHECKOUT_ROOT}/.env.example" "${required_env[@]}"; then
+  pass '.env.example is sourceable and defines every external variable with dummy values'
+else
+  fail '.env.example is sourceable and defines every external variable with dummy values'
+fi
+if grep -Eq '^(VERSION|RELEASE_BRANCH|KONFLUX_NS|OCR_[A-Z0-9_]*)=' "${CHECKOUT_ROOT}/.env.example"; then
+  fail '.env.example excludes release targeting and authorization internals'
+else
+  pass '.env.example excludes release targeting and authorization internals'
+fi
+if git -C "${CHECKOUT_ROOT}" check-ignore -q .env && git -C "${CHECKOUT_ROOT}" check-ignore -q reports/example/report.md; then
+  pass '.gitignore excludes local credentials and generated reports'
+else
+  fail '.gitignore excludes local credentials and generated reports'
+fi
+if git -C "${CHECKOUT_ROOT}" check-ignore -q .env.example; then
+  fail '.env.example remains trackable'
+else
+  pass '.env.example remains trackable'
+fi
 
 run_rc() {
   set +e
@@ -135,6 +172,35 @@ assert_file "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/image-copy-images.tsv" 'image
 assert_eq 'index-stage-retry' "$(cut -f1 "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/image-copy-images.tsv")" 'successful Release retry supersedes the historical failed CR'
 if grep -q -- '--token\|placeholder-token-value' "${OCR_TEST_COMMAND_LOG}"; then fail 'Konflux token is absent from process arguments'; else pass 'Konflux token is absent from process arguments'; fi
 unset OCR_TEST_OC_SCENARIO
+
+: >"${OCR_TEST_COMMAND_LOG}"
+export OCR_TEST_GH_SCENARIO=config_match
+export OCR_TEST_OC_SCENARIO=config_match
+assert_eq '2' "$(run_rc "${SCRIPTS_DIR}/config/verify.sh" 1.21.3)" 'matching Step 1.4 fixture advances beyond the application comparison'
+config_report="${OCR_REPORT_ROOT}/1.21/1.21.3/config/report_2026-09-28_12-00-00_UTC.md"
+if grep -Fq '| 1.4 | Konflux config on cluster | DONE | 1 applications checked |' "${config_report}" &&
+  grep -Fq $'core\tcontroller,webhook\tcontroller,webhook\tOK' "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config-applications.tsv"; then
+  pass 'Step 1.4 accepts exactly matching application names and components'
+else
+  fail 'Step 1.4 accepts exactly matching application names and components'
+fi
+if grep -Fxq 'paste -sd, -' "${OCR_TEST_COMMAND_LOG}"; then
+  pass 'Step 1.4 uses strict BSD-compatible paste stdin syntax'
+else
+  fail 'Step 1.4 uses strict BSD-compatible paste stdin syntax'
+fi
+
+: >"${OCR_TEST_COMMAND_LOG}"
+export OCR_TEST_GH_SCENARIO=config_missing_app
+export OCR_TEST_OC_SCENARIO=config_missing_app
+assert_eq '2' "$(run_rc "${SCRIPTS_DIR}/config/verify.sh" 1.21.3)" 'misnamed Step 1.4 application fails closed'
+if grep -Fq '| 1.4 | Konflux config on cluster | ACTION NEEDED | 1 applications checked; core:MISSING_APP |' "${config_report}" &&
+  grep -Fq $'core\tcontroller,webhook\t\tMISSING' "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config-applications.tsv"; then
+  pass 'Step 1.4 reports a missing or misnamed application as MISSING_APP'
+else
+  fail 'Step 1.4 reports a missing or misnamed application as MISSING_APP'
+fi
+unset OCR_TEST_GH_SCENARIO OCR_TEST_OC_SCENARIO
 
 assert_eq '[REDACTED] and [REDACTED]' "$(GITHUB_TOKEN=github-secret KONFLUX_TOKEN=cluster-secret ocr_redact 'github-secret and cluster-secret')" 'secret redaction removes credential values'
 assert_eq 'prefix [REDACTED] [REDACTED] suffix' "$(GITHUB_TOKEN='a[b]c' KONFLUX_TOKEN='a\b' ocr_redact 'prefix a[b]c a\b suffix')" 'secret redaction treats glob and escape characters literally'
