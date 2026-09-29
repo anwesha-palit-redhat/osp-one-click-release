@@ -75,8 +75,201 @@ manual_action() {
   return 2
 }
 
-execute_1_5() { manual_action 'MANUAL: copy RPAs from hack .konflux/ into konflux-release-data via a GitLab MR.'; }
-execute_1_6() { manual_action 'MANUAL: add Pyxis configuration via a GitLab MR when new component images are introduced.'; }
+execute_1_5() {
+  ocr_require_gitlab || return 2
+
+  # Re-run filename check to determine if minor-version RPAs exist at all
+  local data names
+  data=$(ocr_gitlab_get "${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data/repository/tree?path=config/kflux-prd-rh02.0fk9.p1/product/ReleasePlanAdmission/tekton-ecosystem&ref=main&per_page=100") || {
+    printf 'Unable to query konflux-release-data.\n' >&2
+    return 2
+  }
+  names=$(jq -r --arg mm "${MM_DASHED}" '.[] | select(.name | contains($mm)) | .name' <<<"${data}")
+  if [[ -z "${names}" ]]; then
+    # No minor-version RPAs at all — first release, stay MANUAL
+    manual_action 'MANUAL: copy RPAs from hack .konflux/ into konflux-release-data via a GitLab MR. Reference: https://gitlab.cee.redhat.com/releng/konflux-release-data/-/merge_requests/10083/diffs'
+    return
+  fi
+
+  # Minor-version RPAs exist but patch content needs updating
+  # Clone fork, update CDN RPAs and create developer-portal file, open MR
+  local temp branch fork_project_id target_project_id mr_url
+  temp=$(mktemp -d)
+  trap 'rm -rf "${temp}"' RETURN
+
+  printf 'Cloning konflux-release-data fork...\n'
+  git clone --depth 1 "https://oauth2:${GITLAB_TOKEN}@${GITLAB_URL#https://}/releng/konflux-release-data.git" "${temp}/krd" 2>/dev/null || {
+    # If clone fails (no fork access), try forking first
+    printf 'Direct clone failed. Creating fork...\n'
+    curl -s --request POST --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+      "${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data/fork" >/dev/null 2>&1 || true
+    sleep 2
+    git clone --depth 1 "https://oauth2:${GITLAB_TOKEN}@${GITLAB_URL#https://}/${GITLAB_USER:-$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "${GITLAB_URL}/api/v4/user" | jq -r .username)}/konflux-release-data.git" "${temp}/krd" 2>/dev/null || {
+      printf 'Unable to clone konflux-release-data fork.\n' >&2
+      rm -rf "${temp}"; trap - RETURN
+      manual_action 'MANUAL: update CDN RPA productVersionName and create developer-portal version file via a GitLab MR.'
+      return
+    }
+  }
+
+  branch="openshift-pipelines-${VERSION}-rpa-update"
+  (
+    cd "${temp}/krd"
+    git config user.name "${GITHUB_USER:-One Click Release Bot}"
+    git config user.email "${GITHUB_EMAIL:-one-click-release-bot@redhat.com}"
+    git checkout -b "${branch}"
+
+    # Update CDN RPA productVersionName in both prod and stage
+    local cdn_file prev_version
+    for cdn_file in \
+      "config/kflux-prd-rh02.0fk9.p1/product/ReleasePlanAdmission/tekton-ecosystem/openshift-pipelines-${MM_DASHED}-core-cdn-prod.yaml" \
+      "config/kflux-prd-rh02.0fk9.p1/product/ReleasePlanAdmission/tekton-ecosystem/openshift-pipelines-${MM_DASHED}-core-cdn-stage.yaml"; do
+      if [[ -f "${cdn_file}" ]]; then
+        prev_version=$(python3 -c "
+import sys, yaml
+content = yaml.safe_load(open(sys.argv[1]))
+print(content.get('spec',{}).get('data',{}).get('productVersionName',''))
+" "${cdn_file}" 2>/dev/null || true)
+        sed -i "s/productVersionName: \"${prev_version}\"/productVersionName: \"${VERSION}\"/" "${cdn_file}"
+        printf 'Updated %s: %s → %s\n' "$(basename "${cdn_file}")" "${prev_version}" "${VERSION}"
+      fi
+    done
+
+    # Create developer-portal version file
+    local portal_dir="data/external/developer-portal/openshift-pipelines"
+    mkdir -p "${portal_dir}"
+    local prev_portal prev_patch
+    # Find the most recent existing portal file to copy from
+    prev_portal=$(find "${portal_dir}" -maxdepth 1 -name '*.yaml' 2>/dev/null | sort -V | tail -1 || true)
+    if [[ -n "${prev_portal}" ]]; then
+      cp "${prev_portal}" "${portal_dir}/${VERSION}.yaml"
+      sed -i "s/versionName: .*/versionName: \"${VERSION}\"/" "${portal_dir}/${VERSION}.yaml"
+      sed -i "s/releaseDate: .*/releaseDate: \"$(date -u +%Y-%m-%d)\"/" "${portal_dir}/${VERSION}.yaml"
+    else
+      cat > "${portal_dir}/${VERSION}.yaml" <<EOF
+# Generated for openshift-pipelines ${VERSION}
+---
+versionName: "${VERSION}"
+ga: true
+termsAndConditions: "Anonymous Download"
+hidden: false
+invisible: false
+releaseDate: "$(date -u +%Y-%m-%d)"
+EOF
+    fi
+    printf 'Created developer-portal version file: %s.yaml\n' "${VERSION}"
+
+    git add -A
+    git commit -m "Update RPA and developer-portal for openshift-pipelines ${VERSION}"
+    git push origin "${branch}" 2>/dev/null
+  ) || {
+    printf 'Failed to prepare and push branch.\n' >&2
+    rm -rf "${temp}"; trap - RETURN
+    manual_action 'MANUAL: update CDN RPA productVersionName and create developer-portal version file via a GitLab MR.'
+    return
+  }
+
+  # Open MR via GitLab API
+  # Get project IDs
+  fork_project_id=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+    "${GITLAB_URL}/api/v4/projects?search=konflux-release-data&owned=true&per_page=5" \
+    | jq -r '.[0].id // empty')
+  target_project_id=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+    "${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data" \
+    | jq -r '.id // empty')
+
+  if [[ -n "${fork_project_id}" && -n "${target_project_id}" ]]; then
+    mr_url=$(curl -s --request POST --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+      "${GITLAB_URL}/api/v4/projects/${fork_project_id}/merge_requests" \
+      --data-urlencode "source_branch=${branch}" \
+      --data-urlencode "target_branch=main" \
+      --data-urlencode "target_project_id=${target_project_id}" \
+      --data-urlencode "title=Update RPA and developer-portal for openshift-pipelines ${VERSION}" \
+      | jq -r '.web_url // empty')
+    if [[ -n "${mr_url}" ]]; then
+      printf 'MR opened: %s\n' "${mr_url}"
+    else
+      printf 'MR creation failed. Push succeeded — create MR manually from branch %s.\n' "${branch}" >&2
+    fi
+  else
+    printf 'Could not determine project IDs. Create MR manually from branch %s.\n' "${branch}" >&2
+  fi
+
+  rm -rf "${temp}"
+  trap - RETURN
+}
+
+execute_1_6() {
+  # pyxis-repo-configs requires MRs from origin branches, not forks
+  if [[ -z "${GITLAB_PYXIS_PUSH_TOKEN:-}" ]]; then
+    manual_action 'MANUAL: add Pyxis configuration via a GitLab MR. Note: pyxis-repo-configs requires MRs from origin branches (not forks). Request push access from the repo owner to automate this step.'
+    return
+  fi
+
+  local temp branch mr_url project_id
+  temp=$(mktemp -d)
+  trap 'rm -rf "${temp}"' RETURN
+
+  printf 'Cloning pyxis-repo-configs (origin)...\n'
+  git clone --depth 1 "https://oauth2:${GITLAB_PYXIS_PUSH_TOKEN}@${GITLAB_URL#https://}/releng/pyxis-repo-configs.git" "${temp}/pyxis" 2>/dev/null || {
+    printf 'Unable to clone pyxis-repo-configs with push token.\n' >&2
+    rm -rf "${temp}"; trap - RETURN
+    manual_action 'MANUAL: add Pyxis configuration via a GitLab MR.'
+    return
+  }
+
+  branch="openshift-pipelines-pyxis-config-${VERSION}"
+  (
+    cd "${temp}/pyxis"
+    git config user.name "${GITHUB_USER:-One Click Release Bot}"
+    git config user.email "${GITHUB_EMAIL:-one-click-release-bot@redhat.com}"
+    git checkout -b "${branch}"
+
+    # Copy Pyxis config from hack repo if available
+    if [[ -d "${HACK_REPO_PATH:-}" ]] && [[ -d "${HACK_REPO_PATH}/pyxis-repo-configs" ]]; then
+      cp -r "${HACK_REPO_PATH}/pyxis-repo-configs/products/openshift-pipelines/" "products/openshift-pipelines/" 2>/dev/null || true
+    else
+      printf 'Hack repo path not set or pyxis config not found. Creating placeholder.\n' >&2
+      mkdir -p "products/openshift-pipelines"
+    fi
+
+    git add -A
+    if git diff --cached --quiet; then
+      printf 'No changes to commit.\n'
+      exit 0
+    fi
+    git commit -m "Add Pyxis configuration for openshift-pipelines ${VERSION}"
+    git push origin "${branch}" 2>/dev/null
+  ) || {
+    printf 'Failed to prepare and push Pyxis config branch.\n' >&2
+    rm -rf "${temp}"; trap - RETURN
+    manual_action 'MANUAL: add Pyxis configuration via a GitLab MR.'
+    return
+  }
+
+  project_id=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_PYXIS_PUSH_TOKEN}" \
+    "${GITLAB_URL}/api/v4/projects/releng%2Fpyxis-repo-configs" \
+    | jq -r '.id // empty')
+
+  if [[ -n "${project_id}" ]]; then
+    mr_url=$(curl -s --request POST --header "PRIVATE-TOKEN: ${GITLAB_PYXIS_PUSH_TOKEN}" \
+      "${GITLAB_URL}/api/v4/projects/${project_id}/merge_requests" \
+      --data-urlencode "source_branch=${branch}" \
+      --data-urlencode "target_branch=main" \
+      --data-urlencode "title=Add Pyxis configuration for openshift-pipelines ${VERSION}" \
+      | jq -r '.web_url // empty')
+    if [[ -n "${mr_url}" ]]; then
+      printf 'MR opened: %s\n' "${mr_url}"
+    else
+      printf 'MR creation failed. Push succeeded — create MR manually from branch %s.\n' "${branch}" >&2
+    fi
+  else
+    printf 'Could not determine project ID. Create MR manually from branch %s.\n' "${branch}" >&2
+  fi
+
+  rm -rf "${temp}"
+  trap - RETURN
+}
 
 execute_1_7() {
   local project current previous temp branch open_url branch_rc

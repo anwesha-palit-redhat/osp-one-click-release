@@ -216,6 +216,32 @@ verify_1_5() {
     STEP_DETAILS+="; missing:${missing}"
     return "${OCR_RC_BLOCKED}"
   fi
+
+  # Patch-level: check CDN RPA productVersionName
+  local cdn_content cdn_version
+  cdn_content=$(ocr_gitlab_get "${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data/repository/files/config%2Fkflux-prd-rh02.0fk9.p1%2Fproduct%2FReleasePlanAdmission%2Ftekton-ecosystem%2Fopenshift-pipelines-${MM_DASHED}-core-cdn-prod.yaml/raw?ref=main") || {
+    STEP_DETAILS+=' ; unable to check CDN RPA content'
+    return "${OCR_RC_BLOCKED}"
+  }
+  cdn_version=$(python3 -c "
+import sys, yaml
+content = yaml.safe_load(sys.stdin)
+print(content.get('spec',{}).get('data',{}).get('productVersionName',''))
+" <<<"${cdn_content}" 2>/dev/null || true)
+  if [[ "${cdn_version}" != "${VERSION}" ]]; then
+    STEP_DETAILS+="; CDN RPA productVersionName: ${cdn_version:-empty} (expected ${VERSION})"
+    return "${OCR_RC_BLOCKED}"
+  fi
+
+  # Check developer-portal version file
+  local portal_code
+  portal_code=$(curl -s -o /dev/null -w "%{http_code}" --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+    "${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data/repository/files/data%2Fexternal%2Fdeveloper-portal%2Fopenshift-pipelines%2F${VERSION}.yaml/raw?ref=main" \
+    2>/dev/null)
+  if [[ "${portal_code}" != "200" ]]; then
+    STEP_DETAILS+="; developer-portal version file ${VERSION}.yaml missing"
+    return "${OCR_RC_BLOCKED}"
+  fi
 }
 
 verify_1_6() {
