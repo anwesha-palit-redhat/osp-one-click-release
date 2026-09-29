@@ -313,19 +313,37 @@ verify_1_8() {
   while IFS='|' read -r component key repo; do
     current=$(jq -r --arg k "${component}" '.[$k] // empty' <<<"${versions}" | sed 's/^v//')
     branch=$(release_branch_value "${cfg}" "${key}")
-    [[ -n "${branch}" ]] || {
-      if [[ "${component}" == assist && "${current}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    # Classify upstream branch pattern and resolve expected version
+    if [[ -z "${branch}" ]]; then
+      # Component not in hack config; fall back to current version series
+      if [[ -n "${current}" && "${current}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         series=${current%.*}
+        latest=$(latest_in_series "${repo}" "${series}")
       else
         mismatches+=" ${component}:UNKNOWN"
+        printf '%s\t%s\t%s\t%s\t%s\n' "${component}" "—" "${current:-missing}" "unknown" "UNKNOWN" >>"${REPORT_BASE}/.state/opc-version-comparison.tsv"
         continue
       fi
-    }
-    if [[ -n "${branch}" ]]; then
+    elif [[ "${branch}" =~ ^release-v([0-9]+\.[0-9]+)\.x$ ]]; then
+      # Wildcard: release-vX.Y.x — find latest patch in the X.Y series
+      series=${BASH_REMATCH[1]}
+      latest=$(latest_in_series "${repo}" "${series}")
+    elif [[ "${branch}" =~ ^release-v([0-9]+(\.[0-9]+)+)$ ]]; then
+      # Pinned: release-vX.Y.Z — expected version is exactly X.Y.Z
+      latest=${BASH_REMATCH[1]}
+      series="pinned:${latest}"
+    elif [[ "${branch}" == "main" || "${branch}" == "master" ]]; then
+      # Unversioned: find latest release or tag in the repo
+      series="${branch}"
+      latest=$(gh api "repos/${repo}/releases/latest" --jq '.tag_name' 2>/dev/null | sed 's/^v//' || true)
+      [[ -n "${latest}" ]] || latest=$(gh api "repos/${repo}/releases?per_page=1" --jq '.[0].tag_name // empty' 2>/dev/null | sed 's/^v//' || true)
+      [[ -n "${latest}" ]] || latest=${current}
+    else
+      # Unknown pattern; try generic series extraction
       series=${branch#release-v}
       series=${series%.x}
+      latest=$(latest_in_series "${repo}" "${series}")
     fi
-    latest=$(latest_in_series "${repo}" "${series}")
     printf '%s\t%s\t%s\t%s\t%s\n' "${component}" "${series}" "${current:-missing}" "${latest:-unknown}" "$([[ -n "${current}" && "${current}" == "${latest}" ]] && echo CURRENT || echo CHECK)" >>"${REPORT_BASE}/.state/opc-version-comparison.tsv"
     if [[ -z "${current}" || -z "${latest}" ]]; then
       mismatches+=" ${component}:UNKNOWN"

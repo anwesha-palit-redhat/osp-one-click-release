@@ -357,7 +357,8 @@ execute_1_8() {
   mismatches=$(<"${REPORT_BASE}/.state/opc-version-mismatches")
   non_opc=$(sed -E 's/[[:space:]]+opc:[^[:space:]]+//g; s/^[[:space:]]+|[[:space:]]+$//g' <<<"${mismatches}")
   if [[ -n "${non_opc}" ]]; then
-    printf 'MANUAL: component versions require go.mod/vendor updates before the OPC-only bump:%s\n' "${non_opc}" >&2
+    printf 'BLOCKED: non-OPC component versions are outdated and must be updated first:%s\n' "${non_opc}" >&2
+    printf 'Resolve these manually (may require go.mod/vendor updates) then re-run verify.\n' >&2
     return 2
   fi
   versions=$(gh_content "repos/openshift-pipelines/opc/contents/pkg/version.json?ref=${RELEASE_BRANCH}")
