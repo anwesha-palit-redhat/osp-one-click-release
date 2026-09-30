@@ -91,19 +91,28 @@ ocr_execute_stage() {
   local verify_rc=$?
   set -e
   if [[ ${verify_rc} -eq 0 ]]; then
-    printf '%s stage is already complete; nothing to execute.\n' "${STAGE_NAME}"
-    return 0
-  fi
-  local blocking_step
-  blocking_step=$(ocr_state_blocking_step "${STAGE_NAME}") || {
-    printf 'Unable to determine the blocking step; run verify first.\n' >&2
-    return 2
-  }
-  if [[ -z "${requested_step}" ]]; then
-    requested_step=${blocking_step}
-  elif [[ "${requested_step}" != "${blocking_step}" ]]; then
-    printf 'Refusing step %s: the freshly verified blocker is step %s.\n' "${requested_step}" "${blocking_step}" >&2
-    return 2
+    if [[ -n "${OCR_FORCE:-}" && -n "${requested_step}" ]]; then
+      printf '%s stage already complete; --force re-executing step %s.\n' "${STAGE_NAME}" "${requested_step}"
+    else
+      printf '%s stage is already complete; nothing to execute.\n' "${STAGE_NAME}"
+      return 0
+    fi
+  else
+    local blocking_step
+    blocking_step=$(ocr_state_blocking_step "${STAGE_NAME}") || {
+      printf 'Unable to determine the blocking step; run verify first.\n' >&2
+      return 2
+    }
+    if [[ -z "${requested_step}" ]]; then
+      requested_step=${blocking_step}
+    elif [[ "${requested_step}" != "${blocking_step}" ]]; then
+      if [[ -n "${OCR_FORCE:-}" ]]; then
+        printf 'Overriding blocker step %s; --force re-executing step %s.\n' "${blocking_step}" "${requested_step}"
+      else
+        printf 'Refusing step %s: the freshly verified blocker is step %s.\n' "${requested_step}" "${blocking_step}" >&2
+        return 2
+      fi
+    fi
   fi
 
   local valid=false step

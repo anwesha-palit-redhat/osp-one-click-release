@@ -425,18 +425,35 @@ EOF
 }
 
 verify_1_9() {
-  local opc p12n prs number url
+  local opc p12n prs number url opc_gomod p12n_gomod mismatches=''
   opc=$(gh_content "repos/openshift-pipelines/opc/contents/pkg/version.json?ref=${RELEASE_BRANCH}") || return "${OCR_RC_BLOCKED}"
   p12n=$(gh_content "repos/openshift-pipelines/p12n-opc/contents/upstream/pkg/version.json?ref=${RELEASE_BRANCH}") || return "${OCR_RC_BLOCKED}"
   prs=$(gh pr list --repo openshift-pipelines/p12n-opc --base "${RELEASE_BRANCH}" --state all --limit 5 --json number,url 2>/dev/null || printf '[]')
   number=$(jq -r '.[0].number // empty' <<<"${prs}")
   url=$(jq -r '.[0].url // empty' <<<"${prs}")
   [[ -n "${number}" ]] && STEP_LINKS="p12n-opc [#${number}](${url})"
-  STEP_DETAILS='OPC and p12n-opc version.json match'
+
+  # Compare version.json
   if [[ "$(jq -S . <<<"${opc}")" != "$(jq -S . <<<"${p12n}")" ]]; then
-    STEP_DETAILS='p12n-opc upstream/pkg/version.json differs from OPC'
+    mismatches+=' version.json'
+  fi
+
+  # Compare go.mod to detect dependency changes not reflected in version.json
+  opc_gomod=$(gh_content "repos/openshift-pipelines/opc/contents/go.mod?ref=${RELEASE_BRANCH}") || true
+  p12n_gomod=$(gh_content "repos/openshift-pipelines/p12n-opc/contents/upstream/go.mod?ref=${RELEASE_BRANCH}") || true
+  if [[ -n "${opc_gomod}" && -n "${p12n_gomod}" ]]; then
+    if [[ "${opc_gomod}" != "${p12n_gomod}" ]]; then
+      mismatches+=' go.mod'
+    fi
+  elif [[ -n "${opc_gomod}" || -n "${p12n_gomod}" ]]; then
+    mismatches+=' go.mod(missing-in-one-repo)'
+  fi
+
+  if [[ -n "${mismatches}" ]]; then
+    STEP_DETAILS="p12n-opc upstream/ differs from OPC:${mismatches}"
     return "${OCR_RC_BLOCKED}"
   fi
+  STEP_DETAILS='OPC and p12n-opc version.json and go.mod match'
 }
 
 verify_1_10() {

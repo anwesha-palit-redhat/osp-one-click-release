@@ -11,7 +11,7 @@ usage() {
 Usage:
   one-click-release.sh verify VERSION
   one-click-release.sh verify VERSION --stage STAGE [--skip STEPS]
-  one-click-release.sh execute VERSION --stage STAGE [--step STEP] [--skip STEPS]
+  one-click-release.sh execute VERSION --stage STAGE [--step STEP] [--skip STEPS] [--force]
   one-click-release.sh run VERSION --through STAGE
 
 Stages: config, build, image-copy, production-release
@@ -19,6 +19,7 @@ Stages: config, build, image-copy, production-release
 Options:
   --skip STEPS  Comma-separated step numbers to skip during verify or execute
                 (e.g. --skip 1.5 or --skip 1.5,1.6)
+  --force       Allow re-executing a step that already verifies as DONE
 
 Verification is read-only. Execution always requires an exact interactive
 approval phrase. production-release also requires its separate production gate.
@@ -79,6 +80,7 @@ case "${command}" in
     stage=''
     step=''
     skip=''
+    force=false
     while (($#)); do
       case "$1" in
         --stage)
@@ -93,6 +95,10 @@ case "${command}" in
           skip=${2:-}
           shift 2
           ;;
+        --force)
+          force=true
+          shift
+          ;;
         *)
           usage >&2
           exit 64
@@ -105,6 +111,7 @@ case "${command}" in
       exit 64
     }
     [[ -z "${skip}" ]] || export OCR_SKIP_STEPS="${skip}"
+    [[ "${force}" == false ]] || export OCR_FORCE=1
     "$(stage_script "${stage}" execute)" "${version}" "${step}"
     ;;
   run)
