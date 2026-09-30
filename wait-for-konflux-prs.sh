@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -e
 
-
 #tkn pr ls
 
 #?(@.type=='Succeeded')
