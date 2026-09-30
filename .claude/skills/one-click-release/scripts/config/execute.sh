@@ -566,12 +566,63 @@ execute_1_10() {
   git clone -b "${RELEASE_BRANCH}" https://github.com/openshift-pipelines/serve-tkn-cli.git "${temp}/serve-tkn-cli"
   (
     cd "${temp}/serve-tkn-cli"
-    sed_i "/sources\/cli/,/branch =/{s|branch = .*|branch = ${cli_upstream}|}" .gitmodules
+    sed_i "/sources\/cli/,/branch =/s|branch = .*|branch = ${cli_upstream}|" .gitmodules
     git submodule update --init --remote --force --checkout
+
+    # Regenerate stale .konflux/patches after submodule update
+    if [[ -d .konflux/patches ]]; then
+      local patch patch_files
+      for patch in .konflux/patches/*.patch; do
+        [[ -f "${patch}" ]] || continue
+        if ! git apply --check "${patch}" 2>/dev/null; then
+          printf 'Regenerating stale patch: %s\n' "$(basename "${patch}")" >&2
+
+          # Get target files from patch header
+          patch_files=$(grep '^diff --git a/' "${patch}" | sed 's|diff --git a/\([^ ]*\) .*|\1|')
+
+          # Save current state of target files (post-submodule-update)
+          local f
+          for f in ${patch_files}; do
+            [[ -f "${f}" ]] && cp "${f}" "${f}.pre-patch"
+          done
+
+          # Apply with fuzzy matching (tolerates changed context lines)
+          if patch -p1 --fuzz=3 --no-backup-if-mismatch < "${patch}" >/dev/null 2>&1; then
+            # Regenerate: diff between pre-patch and post-patch
+            local new_content=""
+            for f in ${patch_files}; do
+              if [[ -f "${f}.pre-patch" && -f "${f}" ]]; then
+                local file_diff
+                file_diff=$(diff -u "${f}.pre-patch" "${f}" | \
+                  sed "1s|^--- .*|--- a/${f}|; 2s|^+++ .*|+++ b/${f}|" || true)
+                [[ -n "${file_diff}" ]] && new_content+="${file_diff}"$'\n'
+              fi
+            done
+
+            if [[ -n "${new_content}" ]]; then
+              printf '%s' "${new_content}" > "${patch}"
+              printf 'Regenerated: %s\n' "$(basename "${patch}")"
+            fi
+
+            # Restore pre-patch state (patch lives as a file, not applied in repo)
+            for f in ${patch_files}; do
+              [[ -f "${f}.pre-patch" ]] && mv "${f}.pre-patch" "${f}"
+            done
+          else
+            # Cleanup and warn
+            for f in ${patch_files}; do
+              [[ -f "${f}.pre-patch" ]] && mv "${f}.pre-patch" "${f}"
+            done
+            printf 'WARNING: cannot auto-regenerate %s — manual fix required.\n' "$(basename "${patch}")" >&2
+          fi
+        fi
+      done
+    fi
+
     git config user.name "${GITHUB_USER:-One Click Release Bot}"
     git config user.email "${GITHUB_EMAIL:-one-click-release-bot@redhat.com}"
     git checkout -b "${branch}"
-    git add .gitmodules sources/
+    git add .gitmodules sources/ .konflux/patches/
     git commit -m "[bot:${MAJOR_MINOR}] Update submodules to latest upstream"
     git push origin "${branch}"
   )
