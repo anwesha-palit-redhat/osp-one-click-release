@@ -1,0 +1,5 @@
+# Local credentials; keep .env.example tracked.
+.env
+
+# Generated release reports, resumable state, and manifests.
+reports/
