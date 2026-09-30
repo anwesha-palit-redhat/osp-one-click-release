@@ -1,7 +1,7 @@
+#!/usr/bin/env bash
 
 #Create Task
 oc apply -f tasks -f pipelines
-
 
 tkn pipeline start konflux-release-pipeline \
   --serviceaccount=gh-action \
