@@ -25,7 +25,7 @@ ocr_describe_action() {
     1.7) printf 'Create an operator project.yaml version-bump PR.\n' ;;
     1.8a) printf 'Process open OPC component-version update PRs (merge, rebase, or report).\n' ;;
     1.8b) printf 'Create or update the OPC version-bump PR for version.json.\n' ;;
-    1.9) printf 'Manual action: synchronize p12n-opc upstream/.\n' ;;
+    1.9) printf 'Synchronize p12n-opc upstream/ with the latest OPC content.\n' ;;
     1.10) printf 'Merge or create the serve-tkn-cli submodule update PR.\n' ;;
     1.11) printf 'Manual action: create the product version GitLab MR.\n' ;;
     1.12) printf 'Manual action: create CDN RP/RPA GitLab resources.\n' ;;
@@ -436,7 +436,97 @@ execute_1_8b() {
   trap - RETURN
 }
 
-execute_1_9() { manual_action "MANUAL: synchronize p12n-opc upstream/ with OPC ${RELEASE_BRANCH} and create a PR."; }
+execute_1_9() {
+  local branch open url temp
+  branch="release/${VERSION}/p12n-opc-sync"
+
+  # Check for existing open PR
+  open=$(gh pr list --repo openshift-pipelines/p12n-opc --head "${branch}" \
+    --state open --limit 1 --json url)
+  url=$(jq -r '.[0].url // empty' <<<"${open}")
+  if [[ -n "${url}" ]]; then
+    if pr_checks_ready "${url}"; then
+      gh pr merge "${url}" --rebase
+      return
+    fi
+    printf 'Sync PR is not ready to merge: %s\n' "${url}" >&2
+    return 2
+  fi
+
+  # If the branch exists remotely but no open PR, the prior push succeeded
+  # but PR creation failed — resume by opening the PR.
+  if ocr_remote_branch_exists openshift-pipelines/p12n-opc "${branch}"; then
+    gh pr create --repo openshift-pipelines/p12n-opc --base "${RELEASE_BRANCH}" --head "${branch}" \
+      --title "[bot:${MAJOR_MINOR}] Sync upstream with OPC ${VERSION}" \
+      --body "Synchronizes p12n-opc upstream/ directory with the latest OPC content from ${RELEASE_BRANCH}." \
+      --label automated
+    return
+  fi
+
+  # Fresh sync required
+  [[ -n "${GITHUB_USER:-}" && -n "${GITHUB_EMAIL:-}" ]] || {
+    printf 'GITHUB_USER and GITHUB_EMAIL are required.\n' >&2
+    return 2
+  }
+
+  temp=$(mktemp -d)
+  trap 'rm -rf "${temp}"' RETURN
+
+  # Clone OPC (source — depth 1, read-only)
+  git clone --depth 1 -b "${RELEASE_BRANCH}" \
+    https://github.com/openshift-pipelines/opc.git "${temp}/opc" || {
+    printf 'Unable to clone openshift-pipelines/opc.\n' >&2
+    rm -rf "${temp}"; trap - RETURN
+    manual_action "MANUAL: synchronize p12n-opc upstream/ with OPC ${RELEASE_BRANCH} and create a PR."
+    return
+  }
+
+  # Clone p12n-opc (target — depth 1, will push new branch)
+  git clone --depth 1 -b "${RELEASE_BRANCH}" \
+    https://github.com/openshift-pipelines/p12n-opc.git "${temp}/p12n-opc" || {
+    printf 'Unable to clone openshift-pipelines/p12n-opc.\n' >&2
+    rm -rf "${temp}"; trap - RETURN
+    manual_action "MANUAL: synchronize p12n-opc upstream/ with OPC ${RELEASE_BRANCH} and create a PR."
+    return
+  }
+
+  # Sync OPC content into p12n-opc/upstream/
+  rm -rf "${temp}/p12n-opc/upstream"
+  cp -a "${temp}/opc" "${temp}/p12n-opc/upstream"
+  rm -rf "${temp}/p12n-opc/upstream/.git"
+
+  (
+    cd "${temp}/p12n-opc"
+    git config user.name "${GITHUB_USER}"
+    git config user.email "${GITHUB_EMAIL}"
+    git add -A
+    if git diff --cached --quiet; then
+      printf 'p12n-opc upstream/ is already in sync with OPC.\n'
+      exit 0
+    fi
+    git checkout -b "${branch}"
+    git commit -m "[bot:${MAJOR_MINOR}] Sync upstream with OPC ${VERSION}"
+    git push origin "${branch}" --quiet
+  ) || {
+    printf 'Failed to prepare sync branch.\n' >&2
+    rm -rf "${temp}"; trap - RETURN
+    manual_action "MANUAL: synchronize p12n-opc upstream/ with OPC ${RELEASE_BRANCH} and create a PR."
+    return
+  }
+
+  # If no branch was pushed (content was already in sync), we are done
+  if ! ocr_remote_branch_exists openshift-pipelines/p12n-opc "${branch}"; then
+    rm -rf "${temp}"; trap - RETURN
+    return
+  fi
+
+  gh pr create --repo openshift-pipelines/p12n-opc --base "${RELEASE_BRANCH}" --head "${branch}" \
+    --title "[bot:${MAJOR_MINOR}] Sync upstream with OPC ${VERSION}" \
+    --body "Synchronizes p12n-opc upstream/ directory with the latest OPC content from ${RELEASE_BRANCH}." \
+    --label automated
+  rm -rf "${temp}"
+  trap - RETURN
+}
 
 execute_1_10() {
   local open url temp branch cfg cli_upstream branch_rc
