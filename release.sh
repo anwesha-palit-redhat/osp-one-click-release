@@ -1,5 +1,6 @@
-oc apply -f tasks/ -f pipelines/
+#!/usr/bin/env bash
 
+oc apply -f tasks/ -f pipelines/
 
 #echo "Generating Release Config"
 #oc apply -f tasks/release-config-task.yaml
