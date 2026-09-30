@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >>"${OCR_TEST_COMMAND_LOG:?}"
+
+if [[ "${OCR_TEST_GH_SCENARIO:-}" == api_fail && " $* " == *" search prs "* ]]; then
+  printf 'simulated authentication failure: token fixture-secret rejected\n' >&2
+  exit 1
+fi
+if [[ "${OCR_TEST_GH_SCENARIO:-}" == run_list_fail && " $* " == *" run list "* ]]; then
+  printf 'simulated run-list API failure\n' >&2
+  exit 1
+fi
+
+case " $* " in
+  *" run view "*" 12345 --log "*) printf '%s\n' 'make ENVIRONMENT=production update-reference' ;;
+  *" run view "*" 12346 --log "*) printf '%s\n' 'make ENVIRONMENT=staging update-reference' ;;
+  *" workflow run "*) exit 0 ;;
+  *" run list "*) printf '[]\n' ;;
+  *" pr list "*)
+    if [[ "${OCR_TEST_GH_SCENARIO:-}" == config_match || "${OCR_TEST_GH_SCENARIO:-}" == config_missing_app || "${OCR_TEST_GH_SCENARIO:-}" == config_component_api_fail || "${OCR_TEST_GH_SCENARIO:-}" == config_superset || "${OCR_TEST_GH_SCENARIO:-}" == config_missing_component ]]; then
+      printf '[{"number":42,"url":"https://github.com/openshift-pipelines/hack/pull/42","state":"MERGED","mergedAt":"2026-09-28T10:00:00Z"}]\n'
+    elif [[ "${OCR_TEST_GH_SCENARIO:-}" == patch_pr ]]; then
+      printf '[{"number":42,"url":"https://github.com/openshift-pipelines/hack/pull/42","state":"OPEN","mergedAt":null}]\n'
+    else
+      printf '[]\n'
+    fi
+    ;;
+  *" search prs "*) printf '[]\n' ;;
+  *" api repos/openshift-pipelines/hack/contents/config/downstream/releases/1.21.yaml "*)
+    if [[ "${OCR_TEST_GH_SCENARIO:-}" == config_match || "${OCR_TEST_GH_SCENARIO:-}" == config_missing_app || "${OCR_TEST_GH_SCENARIO:-}" == config_component_api_fail || "${OCR_TEST_GH_SCENARIO:-}" == config_superset || "${OCR_TEST_GH_SCENARIO:-}" == config_missing_component ]]; then
+      printf '%s' $'release-tag: 1.21.3\ncode-freeze: false\n' | base64
+    else
+      printf '%s' $'release-tag: 1.21.2\ncode-freeze: false\n' | base64
+    fi
+    ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-core/operator/component-controller-1.21.yaml "*)
+    # Component YAML content: directory name "operator" differs from metadata.name "controller"
+    printf '%s' $'apiVersion: appstudio.redhat.com/v1alpha1\nkind: Component\nmetadata:\n  name: controller\nspec:\n  componentName: controller\n  application: openshift-pipelines-core-1-21\n' | base64
+    ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-core/pac/component-webhook-1.21.yaml "*)
+    # Component YAML content: directory name "pac" differs from metadata.name "webhook"
+    printf '%s' $'apiVersion: appstudio.redhat.com/v1alpha1\nkind: Component\nmetadata:\n  name: webhook\nspec:\n  componentName: webhook\n  application: openshift-pipelines-core-1-21\n' | base64
+    ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-core/operator "*)
+    # List YAML files in operator subdirectory (returns file paths)
+    printf '.konflux/openshift-pipelines/1-21/openshift-pipelines-core/operator/component-controller-1.21.yaml\n'
+    ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-core/pac "*)
+    # List YAML files in pac subdirectory (returns file paths)
+    printf '.konflux/openshift-pipelines/1-21/openshift-pipelines-core/pac/component-webhook-1.21.yaml\n'
+    ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-core "*)
+    # Component subdirectories — names intentionally differ from metadata.name
+    printf 'operator\npac\n'
+    ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-index-4.14/fbc/component-index-1.21.yaml "*)
+    # Component YAML content: directory name "fbc" differs from metadata.name "index"
+    printf '%s' $'apiVersion: appstudio.redhat.com/v1alpha1\nkind: Component\nmetadata:\n  name: index\nspec:\n  componentName: index\n  application: openshift-pipelines-index-4-14-1-21\n' | base64
+    ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-index-4.14/fbc "*)
+    # List YAML files in fbc subdirectory (returns file paths)
+    printf '.konflux/openshift-pipelines/1-21/openshift-pipelines-index-4.14/fbc/component-index-1.21.yaml\n'
+    ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21/openshift-pipelines-index-4.14 "*)
+    if [[ "${OCR_TEST_GH_SCENARIO:-}" == config_component_api_fail ]]; then exit 1; else printf 'fbc\n'; fi
+    ;;
+  *" api repos/openshift-pipelines/hack/contents/.konflux/openshift-pipelines/1-21 "*)
+    # Hack repo always defines the same 2 app directories regardless of scenario
+    printf 'openshift-pipelines-core\nopenshift-pipelines-index-4.14\n'
+    ;;
+  *" api repos/openshift-pipelines/operator/compare/old...new "*)
+    if [[ "${OCR_TEST_GH_SCENARIO:-}" == generated_good ]]; then
+      printf '%s\n' '{"commits":[{"author":{"login":"github-actions[bot]"}}],"files":[{"filename":".konflux/olm-catalog/index/.placeholder"}]}'
+    else
+      printf '%s\n' '{"commits":[{"author":{"login":"human"}}],"files":[{"filename":"pkg/release.go"}]}'
+    fi
+    ;;
+  *) printf '[]\n' ;;
+esac
