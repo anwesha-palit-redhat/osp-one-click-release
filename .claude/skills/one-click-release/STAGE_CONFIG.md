@@ -662,7 +662,7 @@ Manual steps required:
 Repository: https://github.com/openshift-pipelines/opc/tree/${RELEASE_BRANCH}/pkg
 ```
 
-**Note:** Component version updates require updating go.mod dependencies and running `go mod vendor`. The automated PR only handles the `opc` version field. User git credentials (`GITHUB_USER`/`GIHUB_USER` and `GITHUB_EMAIL`) are sourced from `.env` for commit authorship.
+**Note:** Component version updates require updating go.mod dependencies and running `go mod vendor`. The automated PR only handles the `opc` version field. User git credentials (`GITHUB_USER` and `GITHUB_EMAIL`) are sourced from `.env` for commit authorship.
 
 ---
 
