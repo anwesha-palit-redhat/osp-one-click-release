@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf 'paste %s\n' "$*" >>"${OCR_TEST_COMMAND_LOG:?}"
+
+# Model BSD paste's requirement for an explicit input operand. This fixture
+# deliberately rejects the GNU-only form that reads stdin without `-`.
+if (($# != 2)) || [[ "$1" != '-sd,' || "$2" != '-' ]]; then
+  printf 'paste fixture requires: paste -sd, -\n' >&2
+  exit 64
+fi
+
+awk 'NR == 1 { printf "%s", $0; next } { printf ",%s", $0 } END { if (NR) print "" }'
