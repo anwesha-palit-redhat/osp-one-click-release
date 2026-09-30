@@ -19,9 +19,10 @@ Derive:
 
 ## Source Credentials
 
-```bash
-source .env
-```
+The executable reads `.env` as declarative data. It accepts only the credential and
+identity variables listed below; it does not evaluate shell commands, expansions,
+functions, approval variables, path changes, or release-target overrides. Quoted and
+unquoted single-line values are supported.
 
 Required variables and what they gate:
 
@@ -34,6 +35,13 @@ Required variables and what they gate:
 | `JIRA_URL` + `JIRA_EMAIL` + `JIRA_TOKEN` | Audit and Jira steps |
 
 If a credential is missing, note which steps will be skipped.
+
+If a GitHub workflow dispatch returns an ambiguous client error, the executable retains
+`reports/{MAJOR_MINOR}/{VERSION}/.state/workflow-*.pending` and retries discovery without
+redispatching. Only after GitHub confirms the request was rejected and no run exists
+after the timestamp recorded in that file, obtain explicit approval and remove that
+single pending file to permit a new dispatch. Do not clear it merely because a run is
+slow to appear.
 
 ## Time Formatting
 
