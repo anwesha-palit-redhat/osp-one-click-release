@@ -36,21 +36,34 @@ pr_ready() {
 }
 
 process_pr_urls() {
-  local url state
+  local url failed=0
   while IFS= read -r url; do
     [[ -n "${url}" ]] || continue
-    state=$(gh pr view "${url}" --json mergeStateStatus --jq '.mergeStateStatus')
-    if [[ "${state}" == BEHIND ]]; then
+    local data mergeable merge_state
+    data=$(gh pr view "${url}" --json mergeable,mergeStateStatus,statusCheckRollup)
+    mergeable=$(jq -r '.mergeable' <<<"${data}")
+    merge_state=$(jq -r '.mergeStateStatus' <<<"${data}")
+
+    if [[ "${mergeable}" == "CONFLICTING" || "${merge_state}" == "DIRTY" ]]; then
+      printf 'CONFLICT — requires manual resolution: %s\n' "${url}" >&2
+      ((failed += 1))
+    elif [[ "${merge_state}" == "BEHIND" ]]; then
+      printf 'BEHIND — rebasing: %s\n' "${url}" >&2
       gh pr update-branch "${url}" --rebase
-    elif pr_ready "${url}"; then
+      ((failed += 1))
+    elif jq -e '[.statusCheckRollup[]? | select((.status//"") != "COMPLETED")] | length > 0' <<<"${data}" >/dev/null 2>&1; then
+      printf 'CI PENDING — checks still running: %s\n' "${url}" >&2
+      ((failed += 1))
+    elif ! pr_ready "${url}"; then
+      printf 'CI FAILING — requires manual investigation: %s\n' "${url}" >&2
+      ((failed += 1))
+    else
       gh pr edit "${url}" --add-label lgtm,approved,one-click-release
       gh pr review --approve "${url}"
       gh pr merge "${url}" -d -r --auto
-    else
-      printf 'PR requires manual investigation or pending CI: %s\n' "${url}" >&2
-      return 2
     fi
   done
+  ((failed == 0)) || return 2
 }
 
 execute_2_1() {
@@ -98,20 +111,27 @@ push_placeholder() {
 
 execute_2_2() {
   ocr_require_konflux || return 2
-  local repo revs head stale=0
+  local repo revs head stale=0 pending=0
   while IFS='|' read -r repo revs; do
     head=$(git ls-remote "https://github.com/${repo}.git" "refs/heads/${RELEASE_BRANCH}" | awk '{print $1}')
     if [[ "${revs}" == *,* || "${revs}" != "${head}" ]]; then
       ((stale += 1))
       if ocr_mutation_done "core-rebuild-${repo}"; then
         printf 'Rebuild for %s was already pushed; waiting for a current snapshot.\n' "${repo}"
+        ((pending += 1))
         continue
       fi
       push_placeholder "${repo}" .konflux/patches/.placeholder 'One Click Release: build all konflux components'
       ocr_mark_mutation "core-rebuild-${repo}"
+      ((pending += 1))
     fi
   done < <(core_snapshot_rows)
-  ((stale > 0)) || printf 'No stale repositories found on re-check.\n'
+  if ((stale == 0)); then
+    printf 'All repos are current in the core snapshot.\n'
+    return 0
+  fi
+  printf '%d repo(s) stale; %d rebuild(s) pending.\n' "${stale}" "${pending}" >&2
+  return 2
 }
 
 find_app() {
@@ -178,7 +198,13 @@ create_stage_release() {
 
 execute_2_3() {
   ocr_require_konflux || return 2
-  create_stage_release core
+  create_stage_release core || return $?
+  # Record the core snapshot for the production release (step 4.2)
+  local core_app
+  core_app=$(find_app core)
+  STAGE_CORE_SNAPSHOT=$(ocr_latest_snapshot "${core_app}")
+  export STAGE_CORE_SNAPSHOT
+  printf 'STAGE_CORE_SNAPSHOT=%s\n' "${STAGE_CORE_SNAPSHOT}" >>"${REPORT_BASE}/stage-vars.env"
 }
 
 consolidate_conflicting_nudges() {
@@ -221,7 +247,8 @@ consolidate_conflicting_nudges() {
   body=$(jq -r 'map("- #\(.number)") | join("\n")' <<<"${prs}")
   gh pr create --repo openshift-pipelines/operator --base "${RELEASE_BRANCH}" --head "${branch}" \
     --title "chore(deps): consolidated nudge updates for ${VERSION}" \
-    --body "Consolidates SHA updates from conflicting nudge PRs:\n${body}" \
+    --body "Consolidates SHA updates from conflicting nudge PRs:
+${body}" \
     --label konflux-nudge,lgtm,approved,one-click-release
   while IFS= read -r number; do
     gh pr close --repo openshift-pipelines/operator "${number}" \
@@ -230,30 +257,29 @@ consolidate_conflicting_nudges() {
 }
 
 execute_2_4() {
-  local prs
-  local -a ready_urls=()
-  prs=$(gh search prs --owner openshift-pipelines --base "${RELEASE_BRANCH}" --state open \
-    --json url 'label:konflux-nudge') || {
-    printf 'Unable to query nudge PRs; refusing to treat the result as empty.\n' >&2
-    return 2
-  }
-  local url data state
-  while IFS= read -r url; do
+  local prs urls=() ready_urls=() url data state failed=0
+  prs=$(gh pr list --repo openshift-pipelines/operator --base "${RELEASE_BRANCH}" --label konflux-nudge \
+    --state open --limit 100 --json url,mergeable,mergeStateStatus)
+  mapfile -t urls < <(jq -r '.[].url' <<<"${prs}")
+  ((${#urls[@]} > 0)) || return 0
+  for url in "${urls[@]}"; do
     data=$(gh pr view "${url}" --json mergeable,mergeStateStatus,statusCheckRollup)
     state=$(jq -r '.mergeStateStatus' <<<"${data}")
     if [[ "${state}" == BEHIND ]]; then
       gh pr update-branch "${url}" --rebase
+      ((failed += 1))
     elif pr_ready "${url}"; then
       ready_urls+=("${url}")
     elif [[ $(jq -r '.mergeable' <<<"${data}") != CONFLICTING ]]; then
       printf 'Nudge PR has failing or pending CI: %s\n' "${url}" >&2
-      return 2
+      ((failed += 1))
     fi
-  done < <(jq -r '.[].url' <<<"${prs}")
+  done
   if ((${#ready_urls[@]} > 0)); then
     printf '%s\n' "${ready_urls[@]}" | process_pr_urls
   fi
   consolidate_conflicting_nudges
+  ((failed == 0)) || return 2
 }
 
 latest_run_id() {
@@ -359,9 +385,11 @@ execute_2_6() {
       ocr_mark_mutation fbc-index-rebuild
     fi
   fi
-  if [[ "${stale_bundle}" == false && "${stale_index}" == false ]]; then
-    printf 'No stale bundle or index snapshots found on re-check.\n'
+  if [[ "${stale_bundle}" == true || "${stale_index}" == true ]]; then
+    printf 'FBC snapshot(s) still stale; waiting for rebuild(s) to complete.\n' >&2
+    return 2
   fi
+  printf 'All FBC snapshots are current.\n'
 }
 
 execute_2_7() {
