@@ -16,6 +16,10 @@ ocr_verify_stage() {
 
   local blocked=false step title rc
   for step in "${STAGE_STEPS[@]}"; do
+    # --step: skip steps that aren't the requested one
+    if [[ -n "${OCR_VERIFY_STEP:-}" && "${step}" != "${OCR_VERIFY_STEP}" ]]; then
+      continue
+    fi
     title=$(ocr_step_title "${step}")
     if ocr_step_is_skipped "${step}"; then
       ocr_report_add "${step}" "${title}" 'SKIPPED' 'skipped by user' '—'

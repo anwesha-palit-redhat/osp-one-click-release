@@ -10,7 +10,7 @@ usage() {
   cat <<'EOF'
 Usage:
   one-click-release.sh verify VERSION
-  one-click-release.sh verify VERSION --stage STAGE [--skip STEPS]
+  one-click-release.sh verify VERSION --stage STAGE [--step STEP] [--skip STEPS]
   one-click-release.sh execute VERSION --stage STAGE [--step STEP] [--skip STEPS] [--force]
   one-click-release.sh run VERSION --through STAGE
 
@@ -46,11 +46,16 @@ case "${command}" in
     version=${2:-}
     shift 2 || true
     stage=''
+    step=''
     skip=''
     while (($#)); do
       case "$1" in
         --stage)
           stage=$(ocr_normalize_stage "${2:-}")
+          shift 2
+          ;;
+        --step)
+          step=${2:-}
           shift 2
           ;;
         --skip)
@@ -64,6 +69,7 @@ case "${command}" in
       esac
     done
     ocr_validate_version "${version}" || exit 64
+    [[ -z "${step}" ]] || export OCR_VERIFY_STEP="${step}"
     [[ -z "${skip}" ]] || export OCR_SKIP_STEPS="${skip}"
     if [[ -n "${stage}" ]]; then
       run_verify "${version}" "${stage}"
