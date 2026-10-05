@@ -10,7 +10,7 @@ source "${SCRIPTS_DIR}/lib/release.sh"
 source "${SCRIPTS_DIR}/lib/stage-runner.sh"
 
 STAGE_NAME=build
-STAGE_STEPS=(2.1 2.2 2.3 2.4 2.5 2.9 2.6 2.7 2.8)
+STAGE_STEPS=(2.1 2.2 2.3 2.4 2.10 2.5 2.9 2.6 2.7 2.8)
 
 ocr_describe_action() {
   case "$1" in
@@ -23,6 +23,7 @@ ocr_describe_action() {
     2.7) printf 'Create the bundle stage Release CR after the core stage release succeeds.\n' ;;
     2.8) printf 'Create index stage Release CRs after the bundle stage release succeeds.\n' ;;
     2.9) printf 'Create and merge the hack code-freeze PR.\n' ;;
+    2.10) printf 'Verify Konflux component image digests match project.yaml.\n' ;;
   esac
 }
 
@@ -499,10 +500,18 @@ execute_2_9() {
   rm -rf "${temp}"
 }
 
+execute_2_10() {
+  ocr_require_konflux || return 2
+  printf 'No automatic mutation for digest verification.\n' >&2
+  printf 'If digests do not match, check for unmerged nudge PRs (step 2.4) or stale snapshots (step 2.2).\n' >&2
+  return 2
+}
+
 ocr_execute_step() {
   case "$1" in
     2.1) execute_2_1 ;; 2.2) execute_2_2 ;; 2.3) execute_2_3 ;; 2.4) execute_2_4 ;;
     2.5) execute_2_5 ;; 2.6) execute_2_6 ;; 2.7) execute_2_7 ;; 2.8) execute_2_8 ;; 2.9) execute_2_9 ;;
+    2.10) execute_2_10 ;;
   esac
 }
 

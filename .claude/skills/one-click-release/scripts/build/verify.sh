@@ -12,7 +12,7 @@ source "${SCRIPTS_DIR}/lib/stage-runner.sh"
 STAGE_NAME=build
 STAGE_REPORT_TITLE='Build Stage Report'
 STAGE_REPORT_DIR=build
-STAGE_STEPS=(2.1 2.2 2.3 2.4 2.5 2.6 2.7 2.8 2.9)
+STAGE_STEPS=(2.1 2.2 2.3 2.4 2.10 2.5 2.6 2.7 2.8 2.9)
 
 ocr_step_title() {
   case "$1" in
@@ -25,6 +25,7 @@ ocr_step_title() {
     2.7) printf '%s' 'Bundle stage release' ;;
     2.8) printf '%s' 'Index stage releases' ;;
     2.9) printf '%s' 'Code freeze' ;;
+    2.10) printf '%s' 'Digest verification' ;;
   esac
 }
 
@@ -234,10 +235,91 @@ verify_2_9() {
   [[ "${value}" == true ]] || return "${OCR_RC_BLOCKED}"
 }
 
+verify_2_10() {
+  ocr_require_konflux || return "${OCR_RC_SKIP}"
+
+  local core_app snapshot components_json project_yaml
+  core_app=$(find_app core)
+  [[ -n "${core_app}" ]] || {
+    printf 'Core application not found.\n' >&2
+    return "${OCR_RC_BLOCKED}"
+  }
+
+  # Get the latest core snapshot
+  snapshot=$(ocr_latest_snapshot "${core_app}")
+  [[ -n "${snapshot}" ]] || {
+    printf 'No core snapshot found.\n' >&2
+    return "${OCR_RC_BLOCKED}"
+  }
+
+  # Extract components from the snapshot
+  components_json=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.spec.components}')
+
+  # Get project.yaml from operator release branch
+  project_yaml=$(gh api "repos/openshift-pipelines/operator/contents/project.yaml" \
+    -H 'Accept: application/vnd.github.raw' \
+    --jq '.' -f ref="${RELEASE_BRANCH}" 2>/dev/null) || {
+    printf 'Unable to fetch project.yaml from operator %s branch.\n' "${RELEASE_BRANCH}" >&2
+    return "${OCR_RC_BLOCKED}"
+  }
+
+  printf 'Snapshot: %s\n' "${snapshot}"
+
+  # Compare digests using Python
+  local mismatch_count
+  mismatch_count=$(python3 -c "
+import json, sys, yaml
+
+components = json.loads(sys.argv[1])
+project = yaml.safe_load(sys.argv[2])
+
+# Build map from image base path -> digest from project.yaml
+proj_images = {}
+for entry in project.get('images', []):
+    val = entry.get('value', '')
+    if '@sha256:' in val:
+        base, digest = val.rsplit('@', 1)
+        proj_images[base] = digest
+
+# Compare snapshot containerImage digests against project.yaml
+mismatches = 0
+matched = 0
+for c in components:
+    image = c.get('containerImage', '')
+    name = c.get('name', '')
+    if '@sha256:' not in image:
+        continue
+    base, digest = image.rsplit('@', 1)
+    short_name = base.split('/')[-1]
+    if base in proj_images:
+        if digest == proj_images[base]:
+            print(f'MATCH\t{short_name}\t{digest[:19]}', file=sys.stderr)
+            matched += 1
+        else:
+            print(f'MISMATCH\t{short_name}\tsnap={digest[:19]}\tproj={proj_images[base][:19]}', file=sys.stderr)
+            mismatches += 1
+    else:
+        print(f'MISSING\t{short_name}\t(not in project.yaml)', file=sys.stderr)
+        mismatches += 1
+
+print(f'Checked {matched + mismatches} components: {matched} match, {mismatches} mismatch/missing', file=sys.stderr)
+print(mismatches)
+" "${components_json}" "${project_yaml}")
+
+  if ((mismatch_count > 0)); then
+    printf '%d component(s) have digest mismatches with project.yaml.\n' "${mismatch_count}" >&2
+    return "${OCR_RC_BLOCKED}"
+  fi
+
+  printf 'All component digests in snapshot match project.yaml.\n'
+  return 0
+}
+
 ocr_verify_step() {
   case "$1" in
     2.1) verify_2_1 ;; 2.2) verify_2_2 ;; 2.3) verify_2_3 ;; 2.4) verify_2_4 ;;
     2.5) verify_2_5 ;; 2.6) verify_2_6 ;; 2.7) verify_2_7 ;; 2.8) verify_2_8 ;; 2.9) verify_2_9 ;;
+    2.10) verify_2_10 ;;
   esac
 }
 
