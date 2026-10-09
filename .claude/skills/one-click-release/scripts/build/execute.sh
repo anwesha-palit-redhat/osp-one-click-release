@@ -403,6 +403,8 @@ execute_2_8() {
         printf 'Existing release %s is still pending; refusing a duplicate.\n' "${existing_name}" >&2
         return 2
       }
+      # Released=False means the release is in progress — skip to avoid creating a duplicate.
+      continue
     fi
     ocp=${app#openshift-pipelines-index-}
     ocp=${ocp%-"${MM_DASHED}"}
