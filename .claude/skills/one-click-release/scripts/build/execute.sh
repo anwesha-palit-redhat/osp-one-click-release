@@ -168,9 +168,12 @@ existing_release_for_snapshot() {
   local rp=$1 snapshot=$2
   ocr_oc_get releases -o json | jq -r --arg rp "${rp}" --arg snapshot "${snapshot}" '
     [.items[] | select(.spec.releasePlan==$rp and .spec.snapshot==$snapshot)
-      | {name:.metadata.name,status:([.status.conditions[]? | select(.type=="Released")][0].status // "Unknown"),created:(.metadata.creationTimestamp // "")}]
+      | {name:.metadata.name,
+         status:([.status.conditions[]? | select(.type=="Released")][0].status // "Unknown"),
+         reason:([.status.conditions[]? | select(.type=="Released")][0].reason // "Unknown"),
+         created:(.metadata.creationTimestamp // "")}]
       | sort_by(.created) | .[-1]
-      | if . == null then empty else "\(.name)|\(.status)" end'
+      | if . == null then empty else "\(.name)|\(.status)|\(.reason)" end'
 }
 
 create_stage_release() {
@@ -190,15 +193,25 @@ create_stage_release() {
     printf 'No stage release plan for %s.\n' "${app}" >&2
     return 2
   }
-  local existing existing_name existing_status
+  local existing existing_name existing_status existing_reason
   existing=$(existing_release_for_snapshot "${rp}" "${snapshot}")
   if [[ -n "${existing}" ]]; then
     existing_name=${existing%%|*}
     existing_status=${existing#*|}
-    printf 'Release %s already exists for this snapshot (Released=%s).\n' "${existing_name}" "${existing_status}" >&2
+    existing_status=${existing_status%%|*}
+    existing_reason=${existing##*|}
+    printf 'Release %s already exists for this snapshot (Released=%s, Reason=%s).\n' "${existing_name}" "${existing_status}" "${existing_reason}" >&2
     [[ "${existing_status}" == True ]] && return 0
-    [[ "${existing_status}" == False ]] || return 2
-    printf 'The latest attempt failed; creating the supported retry Release CR.\n' >&2
+    if [[ "${existing_status}" == False ]]; then
+      if [[ "${existing_reason}" == Failed ]]; then
+        printf 'The latest attempt failed; creating the supported retry Release CR.\n' >&2
+      else
+        printf 'Release %s is still in progress (Reason=%s); skipping duplicate creation.\n' "${existing_name}" "${existing_reason}" >&2
+        return 2
+      fi
+    else
+      return 2
+    fi
   fi
   path="${REPORT_BASE}/manifest/stage/release-${VERSION}-${kind}-stage.yaml"
   ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
@@ -438,20 +451,29 @@ execute_2_13() {
       printf 'No stage release plan for %s.\n' "${app}" >&2
       return 2
     }
-    local existing existing_name existing_status
+    local existing existing_name existing_status existing_reason
     existing=$(existing_release_for_snapshot "${rp}" "${snapshot}")
     if [[ -n "${existing}" ]]; then
       existing_name=${existing%%|*}
       existing_status=${existing#*|}
-      printf 'Release %s already exists for %s (Released=%s); skipping duplicate creation.\n' "${existing_name}" "${app}" "${existing_status}"
+      existing_status=${existing_status%%|*}
+      existing_reason=${existing##*|}
+      printf 'Release %s already exists for %s (Released=%s, Reason=%s).\n' "${existing_name}" "${app}" "${existing_status}" "${existing_reason}"
       if [[ "${existing_status}" == True ]]; then
         ((made += 1))
         continue
       fi
-      [[ "${existing_status}" == False ]] || {
-        printf 'Existing release %s is still pending; refusing a duplicate.\n' "${existing_name}" >&2
+      if [[ "${existing_status}" == False ]]; then
+        if [[ "${existing_reason}" == Failed ]]; then
+          printf 'The latest attempt for %s failed; creating a retry Release CR.\n' "${app}" >&2
+        else
+          printf 'Release %s for %s is still in progress (Reason=%s); skipping.\n' "${existing_name}" "${app}" "${existing_reason}"
+          continue
+        fi
+      else
+        printf 'Existing release %s is in an unknown state; refusing a duplicate.\n' "${existing_name}" >&2
         return 2
-      }
+      fi
     fi
     ocp=${app#openshift-pipelines-index-}
     ocp=${ocp%-"${MM_DASHED}"}
