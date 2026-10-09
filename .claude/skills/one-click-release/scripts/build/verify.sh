@@ -142,9 +142,24 @@ verify_2_7() {
 
 verify_2_10() {
   local csv runs run_url state catalogs diff registry_ok=true error
-  csv=$(gh pr list --repo openshift-pipelines/operator \
-    --head "actions/update/operator-update-images-${RELEASE_BRANCH}" --state merged --limit 1 \
-    --json number,url,mergedAt)
+
+  # Find the most recent commit on the release branch that modified the OLM catalog
+  local catalog_sha catalog_pr_json
+  catalog_sha=$(gh api "repos/openshift-pipelines/operator/commits" \
+    -f sha="${RELEASE_BRANCH}" -f path=".konflux/olm-catalog" -f per_page=1 \
+    --jq '.[0].sha // empty' 2>/dev/null)
+
+  if [[ -n "${catalog_sha}" ]]; then
+    csv=$(gh api "repos/openshift-pipelines/operator/commits/${catalog_sha}/pulls" \
+      --jq '[.[] | select(.merged_at != null) | {number, url: .html_url, mergedAt: .merged_at}]' 2>/dev/null)
+  fi
+
+  # Fallback to old method if commits API returned nothing
+  if [[ -z "${csv}" || "$(jq length <<<"${csv}" 2>/dev/null)" -eq 0 ]]; then
+    csv=$(gh pr list --repo openshift-pipelines/operator \
+      --head "actions/update/operator-update-images-${RELEASE_BRANCH}" --state merged --limit 1 \
+      --json number,url,mergedAt)
+  fi
   runs=$(gh run list --repo openshift-pipelines/operator --workflow=render-olm-catalog.yaml --limit 10 \
     --json status,conclusion,createdAt,displayTitle,headBranch,url,event 2>"${REPORT_BASE}/.state/gh-error") || {
     error=$(<"${REPORT_BASE}/.state/gh-error")

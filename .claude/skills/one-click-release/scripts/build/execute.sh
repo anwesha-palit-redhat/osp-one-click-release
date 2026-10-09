@@ -321,8 +321,22 @@ execute_2_10() {
       pr=''
     fi
   fi
-  merged_pr=$(gh pr list --repo openshift-pipelines/operator --head "actions/update/operator-update-images-${RELEASE_BRANCH}" \
-    --state merged --limit 1 --json number --jq '.[0].number // empty')
+  # Find the most recent commit on the release branch that modified the OLM catalog
+  local catalog_sha
+  catalog_sha=$(gh api "repos/openshift-pipelines/operator/commits" \
+    -f sha="${RELEASE_BRANCH}" -f path=".konflux/olm-catalog" -f per_page=1 \
+    --jq '.[0].sha // empty' 2>/dev/null)
+
+  if [[ -n "${catalog_sha}" ]]; then
+    merged_pr=$(gh api "repos/openshift-pipelines/operator/commits/${catalog_sha}/pulls" \
+      --jq '[.[] | select(.merged_at != null)][0].number // empty' 2>/dev/null)
+  fi
+
+  # Fallback to old method if commits API returned nothing
+  if [[ -z "${merged_pr}" ]]; then
+    merged_pr=$(gh pr list --repo openshift-pipelines/operator --head "actions/update/operator-update-images-${RELEASE_BRANCH}" \
+      --state merged --limit 1 --json number --jq '.[0].number // empty')
+  fi
   if [[ -n "${merged_pr}" ]]; then
     diff=$(gh pr diff --repo openshift-pipelines/operator "${merged_pr}") || {
       printf 'Unable to inspect merged staging CSV PR; refusing to continue.\n' >&2
