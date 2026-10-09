@@ -13,6 +13,7 @@ Usage:
   one-click-release.sh verify VERSION --stage STAGE [--step STEP] [--skip STEPS]
   one-click-release.sh execute VERSION --stage STAGE [--step STEP] [--skip STEPS] [--force]
   one-click-release.sh run VERSION --through STAGE
+  one-click-release.sh unfreeze MAJOR_MINOR
 
 Stages: config, build, image-copy, production-release
 
@@ -20,6 +21,10 @@ Options:
   --skip STEPS  Comma-separated step numbers to skip during verify or execute
                 (e.g. --skip 1.5 or --skip 1.5,1.6)
   --force       Allow re-executing a step that already verifies as DONE
+
+Commands:
+  unfreeze      Lift code freeze for a release by setting code-freeze: false
+                in openshift-pipelines/hack. Accepts MAJOR_MINOR (e.g. 1.21).
 
 Verification is read-only. Execution always requires an exact interactive
 approval phrase. production-release also requires its separate production gate.
@@ -145,6 +150,20 @@ case "${command}" in
       run_verify "${version}" "${stage}"
       [[ "${stage}" == "${through}" ]] && break
     done
+    ;;
+  unfreeze)
+    MAJOR_MINOR=${2:-}
+    [[ "${MAJOR_MINOR}" =~ ^[0-9]+\.[0-9]+$ ]] || {
+      printf 'Invalid MAJOR_MINOR %q; expected X.Y (for example, 1.21).\n' "${MAJOR_MINOR}" >&2
+      exit 64
+    }
+    MM_DASHED=${MAJOR_MINOR//./-}
+    VERSION=${MAJOR_MINOR}.0
+    RELEASE_BRANCH="release-v${MAJOR_MINOR}.x"
+    export VERSION MAJOR_MINOR MM_DASHED RELEASE_BRANCH
+    # shellcheck source=lib/release.sh
+    source "${SCRIPT_DIR}/lib/release.sh"
+    execute_code_unfreeze
     ;;
   -h | --help | help) usage ;;
   *)
