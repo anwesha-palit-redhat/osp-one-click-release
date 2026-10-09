@@ -12,6 +12,7 @@ Usage:
   one-click-release.sh verify VERSION
   one-click-release.sh verify VERSION --stage STAGE [--step STEP] [--skip STEPS]
   one-click-release.sh execute VERSION --stage STAGE [--step STEP] [--skip STEPS] [--force]
+  one-click-release.sh unfreeze MAJOR_MINOR
   one-click-release.sh run VERSION --through STAGE
 
 Stages: config, build, image-copy, production-release
@@ -145,6 +146,16 @@ case "${command}" in
       run_verify "${version}" "${stage}"
       [[ "${stage}" == "${through}" ]] && break
     done
+    ;;
+  unfreeze)
+    shift
+    MAJOR_MINOR="${1:?Usage: $0 unfreeze MAJOR_MINOR (e.g. 1.23)}"
+    MM_DASHED="${MAJOR_MINOR//./-}"
+    VERSION="${VERSION:-${MAJOR_MINOR}.0}"
+    RELEASE_BRANCH="release-v${MAJOR_MINOR}.x"
+    source "${SCRIPTS_DIR}/lib/common.sh"
+    source "${SCRIPTS_DIR}/lib/release.sh"
+    execute_code_unfreeze
     ;;
   -h | --help | help) usage ;;
   *)
