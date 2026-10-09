@@ -107,7 +107,8 @@ execute_2_2() {
         printf 'Rebuild for %s was already pushed; waiting for a current snapshot.\n' "${repo}"
         continue
       fi
-      push_placeholder "${repo}" .konflux/patches/.placeholder 'One Click Release: build all konflux components'
+      repo_name="${repo##*/}"
+      gh workflow run trigger-image-rebuilds.yaml --repo openshift-pipelines/hack -f version="${MAJOR_MINOR}" -f repo="${repo_name}"
       ocr_mark_mutation "core-rebuild-${repo}"
     fi
   done < <(core_snapshot_rows)
