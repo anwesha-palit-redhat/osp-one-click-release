@@ -86,10 +86,21 @@ verify_release() {
 
 verify_4_2() {
   ocr_require_konflux || return $?
-  local stage_snapshot app latest
+  local stage_snapshot app latest user_snapshot
   if [[ -f "${REPORT_BASE}/.state/stage-core-snapshot" ]]; then stage_snapshot=$(<"${REPORT_BASE}/.state/stage-core-snapshot"); else stage_snapshot=''; fi
   [[ -n "${stage_snapshot}" ]] || {
     STEP_DETAILS='succeeded core stage snapshot not found'
+    return "${OCR_RC_BLOCKED}"
+  }
+  if [[ -n "${1:-}" ]]; then
+    user_snapshot=$1
+  else
+    printf 'Stored stage core snapshot: %s\n' "${stage_snapshot}"
+    printf 'Please enter the stage-core-snapshot to proceed with production release: '
+    read -r user_snapshot
+  fi
+  [[ "${user_snapshot}" == "${stage_snapshot}" ]] || {
+    STEP_DETAILS="Snapshot mismatch: user provided '${user_snapshot}' but stored stage core snapshot is '${stage_snapshot}'"
     return "${OCR_RC_BLOCKED}"
   }
   app=$(ocr_oc_get applications.appstudio.redhat.com -o json | jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("core") and contains($mm)) | .metadata.name' | head -1)
