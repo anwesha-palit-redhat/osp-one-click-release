@@ -12,7 +12,7 @@ source "${SCRIPTS_DIR}/lib/stage-runner.sh"
 STAGE_NAME=build
 STAGE_REPORT_TITLE='Build Stage Report'
 STAGE_REPORT_DIR=build
-STAGE_STEPS=(2.1 2.2 2.3 2.4 2.10 2.5 2.6 2.7 2.8 2.9)
+STAGE_STEPS=(2.1 2.2 2.3 2.4 2.5 2.6 2.7 2.8 2.9 2.10 2.11 2.12 2.13)
 
 find_app() {
   local kind=$1
@@ -22,16 +22,19 @@ find_app() {
 
 ocr_step_title() {
   case "$1" in
-    2.1) printf '%s' 'Process release PRs' ;;
-    2.2) printf '%s' 'Wait for core snapshot' ;;
-    2.3) printf '%s' 'Core stage release' ;;
-    2.4) printf '%s' 'Process nudge PRs' ;;
-    2.5) printf '%s' 'OLM catalog render' ;;
-    2.6) printf '%s' 'Wait for FBC build' ;;
-    2.7) printf '%s' 'Bundle stage release' ;;
-    2.8) printf '%s' 'Index stage releases' ;;
-    2.9) printf '%s' 'Code freeze' ;;
-    2.10) printf '%s' 'Digest verification' ;;
+    2.1) printf '%s' 'Ensure code freeze inactive' ;;
+    2.2) printf '%s' 'Trigger update-sources' ;;
+    2.3) printf '%s' 'Process release PRs' ;;
+    2.4) printf '%s' 'Code freeze' ;;
+    2.5) printf '%s' 'Digest verification' ;;
+    2.6) printf '%s' 'Wait for core snapshot' ;;
+    2.7) printf '%s' 'Process nudge PRs' ;;
+    2.8) printf '%s' 'Gate: snapshot + digests' ;;
+    2.9) printf '%s' 'Core stage release' ;;
+    2.10) printf '%s' 'OLM catalog render' ;;
+    2.11) printf '%s' 'Wait for FBC build' ;;
+    2.12) printf '%s' 'Bundle stage release' ;;
+    2.13) printf '%s' 'Index stage releases' ;;
   esac
 }
 
@@ -39,7 +42,7 @@ release_status_json() {
   ocr_oc_get releases -o json 2>/dev/null
 }
 
-verify_2_1() {
+verify_2_3() {
   local prs count error
   prs=$(gh search prs --owner openshift-pipelines --base "${RELEASE_BRANCH}" --state open \
     --json repository,url,title,labels 'label:hack,upstream,automated' 2>"${REPORT_BASE}/.state/gh-error") || {
@@ -55,7 +58,7 @@ verify_2_1() {
   fi
 }
 
-verify_2_2() {
+verify_2_6() {
   ocr_require_konflux || return $?
   local apps core snapshot components rows stale=''
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
@@ -116,12 +119,12 @@ verify_release_kind() {
   [[ -n "${latest_snapshot}" ]] && ((success > 0)) || return "${OCR_RC_BLOCKED}"
 }
 
-verify_2_3() {
+verify_2_9() {
   ocr_require_konflux || return $?
   verify_release_kind core stage cdn
 }
 
-verify_2_4() {
+verify_2_7() {
   local prs count error
   prs=$(gh search prs --owner openshift-pipelines --base "${RELEASE_BRANCH}" --state open \
     --json repository,url,title,labels 'label:konflux-nudge' 2>"${REPORT_BASE}/.state/gh-error") || {
@@ -137,7 +140,7 @@ verify_2_4() {
   fi
 }
 
-verify_2_5() {
+verify_2_10() {
   local csv runs run_url state catalogs diff registry_ok=true error
   csv=$(gh pr list --repo openshift-pipelines/operator \
     --head "actions/update/operator-update-images-${RELEASE_BRANCH}" --state merged --limit 1 \
@@ -172,7 +175,7 @@ verify_2_5() {
   STEP_LINKS="operator [#${state}]($(jq -r '.[0].url' <<<"${csv}")), [render-olm-catalog](${run_url})"
 }
 
-verify_2_6() {
+verify_2_11() {
   ocr_require_konflux || return $?
   local apps operator_head bundle snapshot rev stale='' checked=0 app
   : >"${REPORT_BASE}/.state/fbc-snapshot-comparison.tsv"
@@ -217,12 +220,12 @@ verify_2_6() {
   fi
 }
 
-verify_2_7() {
+verify_2_12() {
   ocr_require_konflux || return $?
   verify_release_kind bundle stage
 }
 
-verify_2_8() {
+verify_2_13() {
   ocr_require_konflux || return $?
   local apps releases app snapshot total=0 succeeded=0 status
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
@@ -242,7 +245,7 @@ verify_2_8() {
   ((total > 0 && succeeded == total)) || return "${OCR_RC_BLOCKED}"
 }
 
-verify_2_9() {
+verify_2_4() {
   local cfg value prs number url
   cfg=$(gh api "repos/openshift-pipelines/hack/contents/config/downstream/releases/${MAJOR_MINOR}.yaml" --jq '.content' | base64 -d)
   value=$(awk '/code-freeze:/ {print $2; exit}' <<<"${cfg}")
@@ -255,7 +258,7 @@ verify_2_9() {
   [[ "${value}" == true ]] || return "${OCR_RC_BLOCKED}"
 }
 
-verify_2_10() {
+verify_2_5() {
   ocr_require_konflux || return "${OCR_RC_SKIP}"
 
   local core_app snapshot components_json project_yaml
@@ -334,11 +337,49 @@ print(mismatches)
   return 0
 }
 
+verify_2_1() {
+  local cfg value
+  cfg=$(gh api "repos/openshift-pipelines/hack/contents/config/downstream/releases/${MAJOR_MINOR}.yaml?ref=main" --jq '.content' | base64 -d)
+  value=$(grep -E '^\s*code-freeze:' <<<"${cfg}" | awk '{print $2}' | head -1)
+  if [[ "${value}" == "true" ]]; then
+    STEP_DETAILS="code-freeze: true — build cannot proceed"
+    return "${OCR_RC_BLOCKED}"
+  fi
+  STEP_DETAILS="code-freeze: ${value:-false}"
+}
+
+verify_2_2() {
+  if ocr_mutation_done "trigger-update-sources"; then
+    STEP_DETAILS="trigger-update-sources already dispatched"
+    return 0
+  fi
+  STEP_DETAILS="trigger-update-sources not yet dispatched"
+  return "${OCR_RC_BLOCKED}"
+}
+
+verify_2_8() {
+  local snapshot_rc=0 digest_rc=0 failed=()
+  verify_2_6 || snapshot_rc=$?
+  verify_2_5 || digest_rc=$?
+  if ((snapshot_rc != 0)); then
+    failed+=("snapshot check (step 2.6)")
+  fi
+  if ((digest_rc != 0)); then
+    failed+=("digest check (step 2.5)")
+  fi
+  if ((${#failed[@]} > 0)); then
+    STEP_DETAILS="gate failed: $(IFS=', '; echo "${failed[*]}")"
+    return "${OCR_RC_BLOCKED}"
+  fi
+  STEP_DETAILS="snapshot and digest checks both passed"
+}
+
 ocr_verify_step() {
   case "$1" in
     2.1) verify_2_1 ;; 2.2) verify_2_2 ;; 2.3) verify_2_3 ;; 2.4) verify_2_4 ;;
-    2.5) verify_2_5 ;; 2.6) verify_2_6 ;; 2.7) verify_2_7 ;; 2.8) verify_2_8 ;; 2.9) verify_2_9 ;;
-    2.10) verify_2_10 ;;
+    2.5) verify_2_5 ;; 2.6) verify_2_6 ;; 2.7) verify_2_7 ;; 2.8) verify_2_8 ;;
+    2.9) verify_2_9 ;; 2.10) verify_2_10 ;; 2.11) verify_2_11 ;; 2.12) verify_2_12 ;;
+    2.13) verify_2_13 ;;
   esac
 }
 
