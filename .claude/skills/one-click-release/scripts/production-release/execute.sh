@@ -110,10 +110,21 @@ execute_4_1() {
 
 execute_4_2() {
   ocr_require_konflux || return 2
-  local snapshot current app
+  local snapshot current app user_snapshot
   if [[ -f "${REPORT_BASE}/.state/stage-core-snapshot" ]]; then snapshot=$(<"${REPORT_BASE}/.state/stage-core-snapshot"); else snapshot=''; fi
   [[ -n "${snapshot}" ]] || {
     printf 'No succeeded core stage snapshot found.\n' >&2
+    return 2
+  }
+  if [[ -n "${1:-}" ]]; then
+    user_snapshot=$1
+  else
+    printf 'Stored stage core snapshot: %s\n' "${snapshot}"
+    printf 'Please enter the stage-core-snapshot to proceed with production release: '
+    read -r user_snapshot
+  fi
+  [[ "${user_snapshot}" == "${snapshot}" ]] || {
+    printf 'Snapshot mismatch: user provided '\''%s'\'' but stored stage core snapshot is '\''%s'\''\n' "${user_snapshot}" "${snapshot}" >&2
     return 2
   }
   app=$(find_app core)
