@@ -50,9 +50,11 @@ existing_release_for_snapshot() {
   local rp=$1 snapshot=$2
   ocr_oc_get releases -o json | jq -r --arg rp "${rp}" --arg snapshot "${snapshot}" '
     [.items[] | select(.spec.releasePlan==$rp and .spec.snapshot==$snapshot)
-      | {name:.metadata.name,status:([.status.conditions[]? | select(.type=="Released")][0].status // "Unknown"),created:(.metadata.creationTimestamp // "")}]
+      | {name:.metadata.name,status:([.status.conditions[]? | select(.type=="Released")][0].status // "Unknown"),
+         reason:([.status.conditions[]? | select(.type=="Released")][0].reason // "Unknown"),
+         created:(.metadata.creationTimestamp // "")}]
       | sort_by(.created) | .[-1]
-      | if . == null then empty else "\(.name)|\(.status)" end'
+      | if . == null then empty else "\(.name)|\(.status)|\(.reason)" end'
 }
 
 push_operator_placeholder() {
@@ -73,7 +75,7 @@ push_operator_placeholder() {
 }
 
 create_prod_release() {
-  local kind=$1 snapshot=${2:-} app rp path existing existing_name existing_status
+  local kind=$1 snapshot=${2:-} app rp path existing existing_name existing_status existing_reason
   app=$(find_app "${kind}")
   [[ -n "${app}" ]] || {
     printf '%s app not found.\n' "${kind}" >&2
@@ -93,10 +95,20 @@ create_prod_release() {
   if [[ -n "${existing}" ]]; then
     existing_name=${existing%%|*}
     existing_status=${existing#*|}
-    printf 'Release %s already exists for this snapshot (Released=%s).\n' "${existing_name}" "${existing_status}" >&2
+    existing_status=${existing_status%%|*}
+    existing_reason=${existing##*|}
+    printf 'Release %s already exists for this snapshot (Released=%s, Reason=%s).\n' "${existing_name}" "${existing_status}" "${existing_reason}" >&2
     [[ "${existing_status}" == True ]] && return 0
-    [[ "${existing_status}" == False ]] || return 2
-    printf 'The latest attempt failed; creating the supported retry Release CR.\n' >&2
+    if [[ "${existing_status}" == False ]]; then
+      if [[ "${existing_reason}" == Failed ]]; then
+        printf 'The latest attempt failed; creating the supported retry Release CR.\n' >&2
+      else
+        printf 'Release %s is still in progress (Reason=%s); skipping duplicate creation.\n' "${existing_name}" "${existing_reason}" >&2
+        return 2
+      fi
+    else
+      return 2
+    fi
   fi
   path="${REPORT_BASE}/manifest/prod/release-${VERSION}-${kind}-prod.yaml"
   ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
@@ -384,7 +396,7 @@ execute_4_7() {
 
 execute_4_8() {
   ocr_require_konflux || return 2
-  local bundle apps app snapshot rp ocp path made=0 existing existing_name existing_status
+  local bundle apps app snapshot rp ocp path made=0 existing existing_name existing_status existing_reason
   bundle=$(successful_snapshot bundle prod)
   [[ -n "${bundle}" ]] || {
     printf 'Bundle production release has not succeeded.\n' >&2
@@ -403,15 +415,24 @@ execute_4_8() {
     if [[ -n "${existing}" ]]; then
       existing_name=${existing%%|*}
       existing_status=${existing#*|}
-      printf 'Release %s already exists for %s (Released=%s); skipping duplicate creation.\n' "${existing_name}" "${app}" "${existing_status}"
+      existing_status=${existing_status%%|*}
+      existing_reason=${existing##*|}
+      printf 'Release %s already exists for %s (Released=%s, Reason=%s).\n' "${existing_name}" "${app}" "${existing_status}" "${existing_reason}"
       if [[ "${existing_status}" == True ]]; then
         ((made += 1))
         continue
       fi
-      [[ "${existing_status}" == False ]] || {
-        printf 'Existing release %s is still pending; refusing a duplicate.\n' "${existing_name}" >&2
+      if [[ "${existing_status}" == False ]]; then
+        if [[ "${existing_reason}" == Failed ]]; then
+          printf 'The latest attempt for %s failed; creating a retry Release CR.\n' "${app}" >&2
+        else
+          printf 'Release %s for %s is still in progress (Reason=%s); skipping.\n' "${existing_name}" "${app}" "${existing_reason}"
+          continue
+        fi
+      else
+        printf 'Existing release %s is in an unknown state; refusing a duplicate.\n' "${existing_name}" >&2
         return 2
-      }
+      fi
     fi
     ocp=${app#openshift-pipelines-index-}
     ocp=${ocp%-"${MM_DASHED}"}
@@ -429,7 +450,7 @@ execute_4_8() {
 
 execute_4_9() {
   ocr_require_konflux || return 2
-  local snapshot path rp app release_name existing existing_name existing_status
+  local snapshot path rp app release_name existing existing_name existing_status existing_reason
   snapshot=$(successful_snapshot core prod cdn)
   [[ -n "${snapshot}" ]] || {
     printf 'No succeeded core production snapshot found.\n' >&2
@@ -441,10 +462,20 @@ execute_4_9() {
   if [[ -n "${existing}" ]]; then
     existing_name=${existing%%|*}
     existing_status=${existing#*|}
-    printf 'CDN release %s already exists for this snapshot (Released=%s).\n' "${existing_name}" "${existing_status}" >&2
+    existing_status=${existing_status%%|*}
+    existing_reason=${existing##*|}
+    printf 'CDN release %s already exists for this snapshot (Released=%s, Reason=%s).\n' "${existing_name}" "${existing_status}" "${existing_reason}" >&2
     [[ "${existing_status}" == True ]] && return 0
-    [[ "${existing_status}" == False ]] || return 2
-    printf 'The latest CDN attempt failed; creating a retry Release CR.\n' >&2
+    if [[ "${existing_status}" == False ]]; then
+      if [[ "${existing_reason}" == Failed ]]; then
+        printf 'The latest CDN attempt failed; creating a retry Release CR.\n' >&2
+      else
+        printf 'Release %s is still in progress (Reason=%s); skipping duplicate creation.\n' "${existing_name}" "${existing_reason}" >&2
+        return 2
+      fi
+    else
+      return 2
+    fi
   fi
   path="${REPORT_BASE}/manifest/prod/release-${VERSION}-cdn-prod.yaml"
   {
