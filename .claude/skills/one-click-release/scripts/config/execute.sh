@@ -385,14 +385,95 @@ execute_1_8b() {
   fi
   non_opc=$(sed -E 's/[[:space:]]+opc:[^[:space:]]+//g; s/^[[:space:]]+|[[:space:]]+$//g' <<<"${mismatches}")
   if [[ -n "${non_opc}" ]]; then
-    printf 'MANUAL: non-OPC component versions are outdated:%s\n' "${non_opc}" >&2
-    printf 'For each outdated component, update manually:\n' >&2
-    printf '  1. cd <opc-checkout>\n' >&2
-    printf '  2. go get <module>@v<latest-version>\n' >&2
-    printf '  3. go mod tidy\n' >&2
-    printf '  4. go mod vendor\n' >&2
-    printf '  5. Commit and create a PR against %s\n' "${RELEASE_BRANCH}" >&2
-    return 1
+    if ocr_mutation_done "1.8b-non-opc-gomod"; then
+      printf 'Non-OPC Go module bump already processed.\n'
+    else
+      local nopc_ok=false nopc_branch nopc_tmp
+      nopc_branch="release/${VERSION}/opc-non-opc-version-bump"
+
+      [[ -n "${GITHUB_USER:-}" && -n "${GITHUB_EMAIL:-}" ]] || {
+        printf 'GITHUB_USER and GITHUB_EMAIL are required.\n' >&2
+        return 2
+      }
+
+      # Recovery: branch was pushed in a prior run but PR creation failed
+      if ocr_remote_branch_exists openshift-pipelines/opc "${nopc_branch}"; then
+        gh pr create --repo openshift-pipelines/opc --base "${RELEASE_BRANCH}" --head "${nopc_branch}" \
+          --title "[bot:${MAJOR_MINOR}] Update non-OPC component versions" \
+          --body "Updates Go modules and pkg/version.json for outdated non-OPC components:${non_opc}" \
+          --label automated
+        ocr_mark_mutation "1.8b-non-opc-gomod"
+        nopc_ok=true
+      elif command -v go >/dev/null 2>&1; then
+        nopc_tmp=$(mktemp -d)
+        trap 'rm -rf "${nopc_tmp}"' RETURN
+        if gh repo clone openshift-pipelines/opc "${nopc_tmp}/opc" -- -b "${RELEASE_BRANCH}" --depth 1 --quiet 2>/dev/null; then
+          if (
+            cd "${nopc_tmp}/opc"
+            git config user.name "${GITHUB_USER}"
+            git config user.email "${GITHUB_EMAIL}"
+            local entry comp new repo gomod_path
+            for entry in ${non_opc}; do
+              [[ "${entry}" == *"->"* ]] || continue
+              comp=${entry%%:*}
+              new=${entry#*->}
+              # Map component short name to its GitHub repo
+              case "${comp}" in
+                pac) repo="openshift-pipelines/pipelines-as-code" ;;
+                tkn) repo="tektoncd/cli" ;;
+                results) repo="tektoncd/results" ;;
+                manualapprovalgate) repo="openshift-pipelines/manual-approval-gate" ;;
+                assist) repo="openshift-pipelines/tekton-assist" ;;
+                *) printf 'Unknown component %s — skipping.\n' "${comp}" >&2; continue ;;
+              esac
+              # Look up the Go module path (including any /vN suffix) from go.mod
+              gomod_path=$(grep -oE "github\.com/${repo}(/v[0-9]+)?" go.mod | head -1)
+              [[ -n "${gomod_path}" ]] || {
+                printf 'Module for %s not found in go.mod — skipping.\n' "${comp}" >&2
+                continue
+              }
+              printf 'go get %s@v%s\n' "${gomod_path}" "${new}"
+              go get "${gomod_path}@v${new}"
+              jq --arg k "${comp}" --arg v "${new}" '.[$k] = $v' pkg/version.json >pkg/version.json.tmp
+              mv pkg/version.json.tmp pkg/version.json
+            done
+            go mod tidy
+            go mod vendor
+            git checkout -b "${nopc_branch}"
+            git add -A
+            if git diff --cached --quiet; then
+              printf 'No changes after Go module updates.\n'
+              exit 0
+            fi
+            git commit -m "[bot:${MAJOR_MINOR}] Update non-OPC component versions to latest" \
+              -m "Signed-off-by: ${GITHUB_USER} <${GITHUB_EMAIL}>"
+            git push origin "${nopc_branch}" --quiet
+          ); then
+            if ocr_remote_branch_exists openshift-pipelines/opc "${nopc_branch}"; then
+              gh pr create --repo openshift-pipelines/opc --base "${RELEASE_BRANCH}" --head "${nopc_branch}" \
+                --title "[bot:${MAJOR_MINOR}] Update non-OPC component versions" \
+                --body "Updates Go modules and pkg/version.json for outdated non-OPC components:${non_opc}" \
+                --label automated
+            fi
+            ocr_mark_mutation "1.8b-non-opc-gomod"
+            nopc_ok=true
+          fi
+        fi
+        rm -rf "${nopc_tmp}"
+        trap - RETURN
+      fi
+
+      if [[ "${nopc_ok}" != true ]]; then
+        printf 'MANUAL: non-OPC component versions are outdated:%s\n' "${non_opc}" >&2
+        printf 'For each outdated component, update manually:\n' >&2
+        printf '  1. cd <opc-checkout>\n' >&2
+        printf '  2. go get <module>@v<latest-version>\n' >&2
+        printf '  3. go mod tidy\n' >&2
+        printf '  4. go mod vendor\n' >&2
+        printf '  5. Commit and create a PR against %s\n' "${RELEASE_BRANCH}" >&2
+        return 1
+      fi
+    fi
   fi
   versions=$(gh_content "repos/openshift-pipelines/opc/contents/pkg/version.json?ref=${RELEASE_BRANCH}")
   current=$(jq -r '.opc // empty' <<<"${versions}")
