@@ -240,33 +240,37 @@ ocr_execute_stage() {
     fi
   done
 
-  set +e
-  OCR_SKIP_PROMPT=1 "${STAGE_DIR}/verify.sh" "${version}" >/dev/null
-  local verify_rc=$?
-  set -e
-  if [[ ${verify_rc} -eq 0 ]]; then
-    if [[ -n "${OCR_FORCE:-}" && -n "${requested_step}" ]]; then
-      printf '%s stage already complete; --force re-executing step %s.\n' "${STAGE_NAME}" "${requested_step}"
-    else
+  if [[ -n "${requested_step}" ]]; then
+    # --step mode: verify only the requested step, skip sequential blocker pass
+    set +e
+    OCR_VERIFY_STEP="${requested_step}" OCR_SKIP_PROMPT=1 \
+      "${STAGE_DIR}/verify.sh" "${version}" >/dev/null
+    local verify_rc=$?
+    set -e
+    if [[ ${verify_rc} -eq 0 ]]; then
+      if [[ -n "${OCR_FORCE:-}" ]]; then
+        printf '%s step %s already done; --force re-executing.\n' "${STAGE_NAME}" "${requested_step}"
+      else
+        printf '%s step %s is already complete; nothing to execute.\n' "${STAGE_NAME}" "${requested_step}"
+        return 0
+      fi
+    fi
+  else
+    # No --step: full sequential verify to find the next blocking step
+    set +e
+    OCR_SKIP_PROMPT=1 "${STAGE_DIR}/verify.sh" "${version}" >/dev/null
+    local verify_rc=$?
+    set -e
+    if [[ ${verify_rc} -eq 0 ]]; then
       printf '%s stage is already complete; nothing to execute.\n' "${STAGE_NAME}"
       return 0
     fi
-  else
     local blocking_step
     blocking_step=$(ocr_state_blocking_step "${STAGE_NAME}") || {
       printf 'Unable to determine the blocking step; run verify first.\n' >&2
       return 2
     }
-    if [[ -z "${requested_step}" ]]; then
-      requested_step=${blocking_step}
-    elif [[ "${requested_step}" != "${blocking_step}" ]]; then
-      if [[ -n "${OCR_FORCE:-}" ]]; then
-        printf 'Overriding blocker step %s; --force re-executing step %s.\n' "${blocking_step}" "${requested_step}"
-      else
-        printf 'Refusing step %s: the freshly verified blocker is step %s.\n' "${requested_step}" "${blocking_step}" >&2
-        return 2
-      fi
-    fi
+    requested_step=${blocking_step}
   fi
 
   local valid=false step
