@@ -290,7 +290,17 @@ ocr_execute_stage() {
   fi
 
   ocr_describe_action "${requested_step}"
-  ocr_confirm_action "${STAGE_NAME}" "${requested_step}" || return 3
+  if ! ocr_confirm_action "${STAGE_NAME}" "${requested_step}"; then
+    if [[ -z "${2:-}" && -z "${OCR_RUN_THROUGH:-}" ]]; then
+      local skip_input
+      printf 'Type "s" to skip this step and proceed, or press Enter to stop: ' >&2
+      IFS= read -r skip_input </dev/tty 2>/dev/null || true
+      if [[ "${skip_input}" == [sS] ]]; then
+        return 0
+      fi
+    fi
+    return 3
+  fi
   ocr_execute_step "${requested_step}"
   if [[ "${guard_rerun}" == true ]]; then
     date +"${TZ_FMT}" >"${mutation_marker}"
