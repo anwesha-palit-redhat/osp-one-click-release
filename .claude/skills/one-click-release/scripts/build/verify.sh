@@ -12,7 +12,7 @@ source "${SCRIPTS_DIR}/lib/stage-runner.sh"
 STAGE_NAME=build
 STAGE_REPORT_TITLE='Build Stage Report'
 STAGE_REPORT_DIR=build
-STAGE_STEPS=(2.1 2.2 2.3 2.4 2.5 2.6 2.7 2.8 2.9 2.10 2.11 2.12 2.13)
+STAGE_STEPS=(2.1 2.2 2.3 2.4 2.5 2.6 2.7 2.8 2.9 2.10 2.11 2.12 2.13 2.14)
 
 find_app() {
   local kind=$1
@@ -30,11 +30,12 @@ ocr_step_title() {
     2.6) printf '%s' 'Wait for core snapshot' ;;
     2.7) printf '%s' 'Process nudge PRs' ;;
     2.8) printf '%s' 'Gate: snapshot + digests' ;;
-    2.9) printf '%s' 'Core stage release' ;;
-    2.10) printf '%s' 'OLM catalog render' ;;
-    2.11) printf '%s' 'Wait for FBC build' ;;
-    2.12) printf '%s' 'Bundle stage release' ;;
-    2.13) printf '%s' 'Index stage releases' ;;
+    2.9) printf '%s' 'Apply Konflux resources' ;;
+    2.10) printf '%s' 'Core stage release' ;;
+    2.11) printf '%s' 'OLM catalog render' ;;
+    2.12) printf '%s' 'Wait for FBC build' ;;
+    2.13) printf '%s' 'Bundle stage release' ;;
+    2.14) printf '%s' 'Index stage releases' ;;
   esac
 }
 
@@ -119,9 +120,51 @@ verify_release_kind() {
   [[ -n "${latest_snapshot}" ]] && ((success > 0)) || return "${OCR_RC_BLOCKED}"
 }
 
+verify_rp_version_tag() {
+  local filter=${1:-} rps bad_names
+  rps=$(ocr_oc_get releaseplans -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
+  if [[ -n "${filter}" ]]; then
+    bad_names=$(jq -r --arg mm "${MM_DASHED}" --arg vtag "v${VERSION}" --arg f "${filter}" '
+      [.items[] | select(.metadata.name | contains($mm) and contains($f))
+        | select(([.spec.data.mapping.defaults.tags[]? | select(startswith($vtag))] | length) == 0)]
+      | .[].metadata.name' <<<"${rps}")
+  else
+    bad_names=$(jq -r --arg mm "${MM_DASHED}" --arg vtag "v${VERSION}" '
+      [.items[] | select(.metadata.name | contains($mm))
+        | select(([.spec.data.mapping.defaults.tags[]? | select(startswith($vtag))] | length) == 0)]
+      | .[].metadata.name' <<<"${rps}")
+  fi
+  if [[ -n "${bad_names}" ]]; then
+    STEP_DETAILS+=" — RP(s) missing v${VERSION} tag: ${bad_names//$'\n'/, }"
+    return "${OCR_RC_BLOCKED}"
+  fi
+}
+
 verify_2_9() {
   ocr_require_konflux || return $?
-  verify_release_kind core stage cdn
+  local rps count bad_count bad_names
+  rps=$(ocr_oc_get releaseplans -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
+  count=$(jq --arg mm "${MM_DASHED}" '[.items[] | select(.metadata.name | contains($mm))] | length' <<<"${rps}")
+  ((count > 0)) || {
+    STEP_DETAILS="no ReleasePlans found for ${MM_DASHED}"
+    return "${OCR_RC_BLOCKED}"
+  }
+  bad_names=$(jq -r --arg mm "${MM_DASHED}" --arg vtag "v${VERSION}" '
+    [.items[] | select(.metadata.name | contains($mm))
+      | select(([.spec.data.mapping.defaults.tags[]? | select(startswith($vtag))] | length) == 0)]
+    | .[].metadata.name' <<<"${rps}")
+  if [[ -n "${bad_names}" ]]; then
+    bad_count=$(wc -l <<<"${bad_names}" | tr -d ' ')
+    STEP_DETAILS="${count} ReleasePlan(s); ${bad_count} missing v${VERSION} tag: ${bad_names//$'\n'/, }"
+    return "${OCR_RC_BLOCKED}"
+  fi
+  STEP_DETAILS="${count} ReleasePlan(s) verified with v${VERSION} tags"
+}
+
+verify_2_10() {
+  ocr_require_konflux || return $?
+  verify_release_kind core stage cdn || return $?
+  verify_rp_version_tag core
 }
 
 verify_2_7() {
@@ -140,7 +183,7 @@ verify_2_7() {
   fi
 }
 
-verify_2_10() {
+verify_2_11() {
   local csv runs run_url state catalogs diff registry_ok=true error
 
   # Find the most recent commit on the release branch that modified the OLM catalog
@@ -188,7 +231,7 @@ verify_2_10() {
   STEP_LINKS="operator [#${state}]($(jq -r '.[0].url' <<<"${csv}")), [render-olm-catalog](${run_url})"
 }
 
-verify_2_11() {
+verify_2_12() {
   ocr_require_konflux || return $?
   local apps operator_head bundle snapshot rev stale='' checked=0 app
   : >"${REPORT_BASE}/.state/fbc-snapshot-comparison.tsv"
@@ -233,12 +276,13 @@ verify_2_11() {
   fi
 }
 
-verify_2_12() {
+verify_2_13() {
   ocr_require_konflux || return $?
-  verify_release_kind bundle stage
+  verify_release_kind bundle stage || return $?
+  verify_rp_version_tag bundle
 }
 
-verify_2_13() {
+verify_2_14() {
   ocr_require_konflux || return $?
   local apps releases app snapshot total=0 succeeded=0 status
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
@@ -256,6 +300,7 @@ verify_2_13() {
   done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
   STEP_DETAILS="${succeeded}/${total} index stage releases succeeded"
   ((total > 0 && succeeded == total)) || return "${OCR_RC_BLOCKED}"
+  verify_rp_version_tag index
 }
 
 verify_2_4() {
@@ -392,7 +437,7 @@ ocr_verify_step() {
     2.1) verify_2_1 ;; 2.2) verify_2_2 ;; 2.3) verify_2_3 ;; 2.4) verify_2_4 ;;
     2.5) verify_2_5 ;; 2.6) verify_2_6 ;; 2.7) verify_2_7 ;; 2.8) verify_2_8 ;;
     2.9) verify_2_9 ;; 2.10) verify_2_10 ;; 2.11) verify_2_11 ;; 2.12) verify_2_12 ;;
-    2.13) verify_2_13 ;;
+    2.13) verify_2_13 ;; 2.14) verify_2_14 ;;
   esac
 }
 
