@@ -290,16 +290,23 @@ ocr_execute_stage() {
   fi
 
   ocr_describe_action "${requested_step}"
-  if ! ocr_confirm_action "${STAGE_NAME}" "${requested_step}"; then
-    if [[ -z "${2:-}" && -z "${OCR_RUN_THROUGH:-}" ]]; then
-      local skip_input
-      printf 'Type "s" to skip this step and proceed, or press Enter to stop: ' >&2
-      IFS= read -r skip_input </dev/tty 2>/dev/null || true
-      if [[ "${skip_input}" == [sS] ]]; then
-        return 0
-      fi
+  if [[ "${OCR_RUN_THROUGH:-}" != true ]]; then
+    local expected="execute ${VERSION} ${STAGE_NAME} ${requested_step}"
+    local answer=''
+    if [[ -z "${OCR_VERIFY_STEP:-}" && -z "${2:-}" ]]; then
+      printf 'Explicit approval required. Type exactly: %s OR Type "s" to skip this step and proceed, OR press Enter to stop:\n> ' "${expected}" >&2
+    else
+      printf 'Explicit approval required. Type exactly: %s\n> ' "${expected}" >&2
     fi
-    return 3
+    IFS= read -r answer </dev/tty 2>/dev/null || true
+    if [[ "${answer}" == "${expected}" ]]; then
+      : # approved — fall through to execute
+    elif [[ "${answer}" == [sS] && -z "${OCR_VERIFY_STEP:-}" && -z "${2:-}" ]]; then
+      return 0
+    else
+      printf 'Execution approval not granted; no mutation was run.\n' >&2
+      return 3
+    fi
   fi
   ocr_execute_step "${requested_step}"
   if [[ "${guard_rerun}" == true ]]; then
