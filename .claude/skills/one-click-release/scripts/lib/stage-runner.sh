@@ -83,6 +83,136 @@ ocr_verify_stage() {
   printf '%s stage verified.\n' "${STAGE_NAME}"
 }
 
+ocr_run_through_stage() {
+  local version=$1
+  local stage_name=$2
+  local scripts_dir=$3
+  local wait_interval=${OCR_WAIT_INTERVAL:-300}
+  local max_retries=${OCR_MAX_RETRIES:-60}
+
+  # Extract step list from the stage's verify script.
+  local _steps_line
+  _steps_line=$(grep -m1 '^STAGE_STEPS=' "${scripts_dir}/${stage_name}/verify.sh")
+  if [[ ! "${_steps_line}" =~ ^STAGE_STEPS=\( ]]; then
+    printf 'Cannot parse STAGE_STEPS from %s/verify.sh\n' "${stage_name}" >&2
+    return 64
+  fi
+  eval "${_steps_line}"
+  local -a steps=("${STAGE_STEPS[@]}")
+
+  local start_time step_count done_count=0
+  local -a result_steps=() result_statuses=()
+  local failed=false
+
+  start_time=$(date +%s)
+  step_count=${#steps[@]}
+
+  printf '\n══════════════════════════════════════════════════════════\n'
+  printf '  run-through: %s (%d steps)\n' "${stage_name}" "${step_count}"
+  printf '══════════════════════════════════════════════════════════\n\n'
+
+  local step skip skip_match verify_rc exec_rc retry
+
+  for step in "${steps[@]}"; do
+    # Check if step should be skipped (respects --skip / OCR_SKIP_STEPS).
+    skip_match=false
+    if [[ -n "${OCR_SKIP_STEPS:-}" ]]; then
+      local IFS=','
+      for skip in ${OCR_SKIP_STEPS}; do
+        [[ "${skip}" == "${step}" ]] && skip_match=true
+      done
+      unset IFS
+    fi
+
+    if [[ "${skip_match}" == true ]]; then
+      printf '  [%s] SKIPPED (by --skip)\n' "${step}"
+      result_steps+=("${step}")
+      result_statuses+=("SKIPPED")
+      continue
+    fi
+
+    # Verify this step.
+    verify_rc=0
+    OCR_VERIFY_STEP="${step}" OCR_SKIP_PROMPT=1 \
+      "${scripts_dir}/${stage_name}/verify.sh" "${version}" >/dev/null 2>&1 || verify_rc=$?
+
+    if [[ ${verify_rc} -eq 0 ]]; then
+      printf '  [%s] DONE\n' "${step}"
+      result_steps+=("${step}")
+      result_statuses+=("DONE")
+      done_count=$((done_count + 1))
+      continue
+    fi
+
+    # Step is blocked — auto-execute if execute.sh exists (no approval prompt).
+    if [[ -x "${scripts_dir}/${stage_name}/execute.sh" ]]; then
+      printf '  [%s] BLOCKED — auto-executing...\n' "${step}"
+      exec_rc=0
+      OCR_RUN_THROUGH=true OCR_SKIP_PROMPT=1 \
+        "${scripts_dir}/${stage_name}/execute.sh" "${version}" "${step}" 2>&1 || exec_rc=$?
+      if [[ ${exec_rc} -ne 0 ]]; then
+        printf '  [%s] execute exited %d — polling for completion\n' "${step}" "${exec_rc}"
+      fi
+    else
+      printf '  [%s] BLOCKED (verify-only) — polling for completion\n' "${step}"
+    fi
+
+    # Polling loop: re-verify until DONE or timeout.
+    retry=0
+    while true; do
+      verify_rc=0
+      OCR_VERIFY_STEP="${step}" OCR_SKIP_PROMPT=1 \
+        "${scripts_dir}/${stage_name}/verify.sh" "${version}" >/dev/null 2>&1 || verify_rc=$?
+
+      if [[ ${verify_rc} -eq 0 ]]; then
+        printf '  [%s] DONE (after %d retries)\n' "${step}" "${retry}"
+        result_steps+=("${step}")
+        result_statuses+=("DONE")
+        done_count=$((done_count + 1))
+        break
+      fi
+
+      retry=$((retry + 1))
+      if [[ ${retry} -ge ${max_retries} ]]; then
+        printf '  [%s] TIMED OUT after %d retries\n' "${step}" "${max_retries}" >&2
+        result_steps+=("${step}")
+        result_statuses+=("TIMED_OUT")
+        failed=true
+        break
+      fi
+
+      printf '  [%s] still blocked — retry %d/%d (waiting %ds)\n' \
+        "${step}" "${retry}" "${max_retries}" "${wait_interval}"
+      sleep "${wait_interval}"
+    done
+
+    if [[ "${failed}" == true ]]; then
+      break
+    fi
+  done
+
+  # Summary report.
+  local end_time elapsed_s
+  end_time=$(date +%s)
+  elapsed_s=$((end_time - start_time))
+
+  printf '\n══════════════════════════════════════════════════════════\n'
+  printf '  %s — run-through summary\n' "${stage_name}"
+  printf '══════════════════════════════════════════════════════════\n'
+  local i
+  for ((i = 0; i < ${#result_steps[@]}; i++)); do
+    printf '    [%-5s] %s\n' "${result_steps[i]}" "${result_statuses[i]}"
+  done
+  printf '  ────────────────────────────────────────────────────────\n'
+  printf '    Completed: %d/%d\n' "${done_count}" "${step_count}"
+  printf '    Elapsed:   %dh %dm %ds\n' \
+    "$((elapsed_s / 3600))" "$(( (elapsed_s % 3600) / 60 ))" "$((elapsed_s % 60))"
+  printf '══════════════════════════════════════════════════════════\n\n'
+
+  [[ "${failed}" == true ]] && return 1
+  return 0
+}
+
 ocr_execute_stage() {
   local version=$1 requested_step=${2:-}
   ocr_init_context "${version}" || return 64

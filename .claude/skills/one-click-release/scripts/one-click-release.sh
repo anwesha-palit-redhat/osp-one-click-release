@@ -12,14 +12,15 @@ Usage:
   one-click-release.sh verify VERSION
   one-click-release.sh verify VERSION --stage STAGE [--step STEP] [--skip STEPS]
   one-click-release.sh execute VERSION --stage STAGE [--step STEP] [--skip STEPS] [--force]
-  one-click-release.sh run VERSION --through STAGE
+  one-click-release.sh run VERSION --through STAGE [--skip STEPS] [--wait INTERVAL]
   one-click-release.sh unfreeze MAJOR_MINOR
 
 Stages: config, build, image-copy, production-release
 
 Options:
-  --skip STEPS  Comma-separated step numbers to skip during verify or execute
+  --skip STEPS  Comma-separated step numbers to skip during verify, execute, or run
                 (e.g. --skip 1.5 or --skip 1.5,1.6)
+  --wait SECS   Seconds between polling retries in run mode (default 300)
   --force       Allow re-executing a step that already verifies as DONE
 
 Commands:
@@ -129,10 +130,20 @@ case "${command}" in
     version=${2:-}
     shift 2 || true
     through=''
+    skip=''
+    wait_interval=''
     while (($#)); do
       case "$1" in
         --through)
           through=$(ocr_normalize_stage "${2:-}")
+          shift 2
+          ;;
+        --skip)
+          skip=${2:-}
+          shift 2
+          ;;
+        --wait)
+          wait_interval=${2:-}
           shift 2
           ;;
         *)
@@ -146,8 +157,13 @@ case "${command}" in
       printf '%s\n' '--through is required for run.' >&2
       exit 64
     }
+    [[ -z "${skip}" ]] || export OCR_SKIP_STEPS="${skip}"
+    export OCR_RUN_THROUGH=true
+    export OCR_WAIT_INTERVAL=${wait_interval:-300}
+    # shellcheck source=lib/stage-runner.sh
+    source "${SCRIPT_DIR}/lib/stage-runner.sh"
     for stage in config build image-copy production-release; do
-      run_verify "${version}" "${stage}"
+      ocr_run_through_stage "${version}" "${stage}" "${SCRIPT_DIR}"
       [[ "${stage}" == "${through}" ]] && break
     done
     ;;

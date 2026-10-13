@@ -274,6 +274,7 @@ ocr_abs_time() {
 }
 
 ocr_confirm_action() {
+  [[ "${OCR_RUN_THROUGH:-}" == true ]] && return 0
   local stage=$1 step=$2
   local expected="execute ${VERSION} ${stage} ${step}"
   local answer=''
@@ -286,6 +287,7 @@ ocr_confirm_action() {
 }
 
 ocr_confirm_production() {
+  [[ "${OCR_RUN_THROUGH:-}" == true ]] && return 0
   local expected="start production-release ${VERSION}"
   local answer=''
   printf 'Production release has a separate gate. Type exactly: %s\n> ' "${expected}" >&2

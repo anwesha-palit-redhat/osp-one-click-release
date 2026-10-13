@@ -348,7 +348,7 @@ assert_file "${report}" 'verification writes the compatible report path'
 if grep -q '^| 1.1 | Create new patch version | ACTION NEEDED |' "${report}"; then pass 'report records the blocking step'; else fail 'report records the blocking step'; fi
 if grep -q '^BLOCKING_STEP=1\\.1$\|^BLOCKING_STEP=1.1$' "${OCR_REPORT_ROOT}/1.21/1.21.3/.state/config.state"; then pass 'resume state records the blocker'; else fail 'resume state records the blocker'; fi
 
-assert_eq '2' "$(run_rc "${SCRIPTS_DIR}/one-click-release.sh" run 1.21.3 --through config)" 'run --through stops at a blocking stage'
+assert_eq '1' "$(OCR_WAIT_INTERVAL=0 OCR_MAX_RETRIES=1 run_rc "${SCRIPTS_DIR}/one-click-release.sh" run 1.21.3 --through config)" 'run --through exits non-zero when a step cannot be resolved'
 
 export OCR_TEST_GH_SCENARIO=patch_pr
 assert_eq '2' "$(run_rc "${SCRIPTS_DIR}/one-click-release.sh" verify 1.21.3 --stage config)" 'patch workflow handoff advances verification to the release-manager PR step'
