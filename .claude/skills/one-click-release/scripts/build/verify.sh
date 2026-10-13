@@ -151,7 +151,11 @@ verify_2_9() {
   }
   bad_names=$(jq -r --arg mm "${MM_DASHED}" --arg vtag "v${VERSION}" '
     [.items[] | select(.metadata.name | contains($mm))
-      | select(([.spec.data.mapping.defaults.tags[]? | select(startswith($vtag))] | length) == 0)]
+      | select(
+          ([.spec.data.mapping.defaults.tags[]? | select(startswith($vtag))] | length) == 0
+          and
+          ([.spec.tenantPipeline.params[]? | select(.name == "release_version" and (.value | startswith($vtag)))] | length) == 0
+        )]
     | .[].metadata.name' <<<"${rps}")
   if [[ -n "${bad_names}" ]]; then
     bad_count=$(wc -l <<<"${bad_names}" | tr -d ' ')
