@@ -240,91 +240,111 @@ ocr_execute_stage() {
     fi
   done
 
-  set +e
-  OCR_SKIP_PROMPT=1 "${STAGE_DIR}/verify.sh" "${version}" >/dev/null
-  local verify_rc=$?
-  set -e
-  if [[ ${verify_rc} -eq 0 ]]; then
-    if [[ -n "${OCR_FORCE:-}" && -n "${requested_step}" ]]; then
-      printf '%s stage already complete; --force re-executing step %s.\n' "${STAGE_NAME}" "${requested_step}"
-    else
-      printf '%s stage is already complete; nothing to execute.\n' "${STAGE_NAME}"
-      return 0
-    fi
-  else
-    local blocking_step
-    blocking_step=$(ocr_state_blocking_step "${STAGE_NAME}") || {
-      printf 'Unable to determine the blocking step; run verify first.\n' >&2
-      return 2
-    }
-    if [[ -z "${requested_step}" ]]; then
-      requested_step=${blocking_step}
-    elif [[ "${requested_step}" != "${blocking_step}" ]]; then
-      if [[ -n "${OCR_FORCE:-}" ]]; then
-        printf 'Overriding blocker step %s; --force re-executing step %s.\n' "${blocking_step}" "${requested_step}"
+  # --- skip-continuation loop: when the user types 's' at a prompt, the
+  #     loop re-verifies to find the NEXT blocking step instead of exiting.
+  local _ocr_skip_arg=${2:-}    # original step argument; cleared after first skip
+  local _ocr_skipped=''         # comma-separated list of user-skipped steps
+  while true; do
+    requested_step=${_ocr_skip_arg}
+    local _eff_skip="${OCR_SKIP_STEPS:-}"
+    [[ -n "${_ocr_skipped}" ]] && _eff_skip="${_eff_skip:+${_eff_skip},}${_ocr_skipped}"
+
+    set +e
+    OCR_SKIP_PROMPT=1 OCR_SKIP_STEPS="${_eff_skip}" "${STAGE_DIR}/verify.sh" "${version}" >/dev/null
+    verify_rc=$?
+    set -e
+    if [[ ${verify_rc} -eq 0 ]]; then
+      if [[ -n "${OCR_FORCE:-}" && -n "${requested_step}" ]]; then
+        printf '%s stage already complete; --force re-executing step %s.\n' "${STAGE_NAME}" "${requested_step}"
       else
-        printf 'Refusing step %s: the freshly verified blocker is step %s.\n' "${requested_step}" "${blocking_step}" >&2
+        printf '%s stage is already complete; nothing to execute.\n' "${STAGE_NAME}"
+        return 0
+      fi
+    else
+      local blocking_step
+      blocking_step=$(ocr_state_blocking_step "${STAGE_NAME}") || {
+        printf 'Unable to determine the blocking step; run verify first.\n' >&2
         return 2
+      }
+      if [[ -z "${requested_step}" ]]; then
+        requested_step=${blocking_step}
+      elif [[ "${requested_step}" != "${blocking_step}" ]]; then
+        if [[ -n "${OCR_FORCE:-}" ]]; then
+          printf 'Overriding blocker step %s; --force re-executing step %s.\n' "${blocking_step}" "${requested_step}"
+        else
+          printf 'Refusing step %s: the freshly verified blocker is step %s.\n' "${requested_step}" "${blocking_step}" >&2
+          return 2
+        fi
       fi
     fi
-  fi
 
-  local valid=false step
-  for step in "${STAGE_STEPS[@]}"; do
-    [[ "${step}" == "${requested_step}" ]] && valid=true
+    local valid=false step
+    for step in "${STAGE_STEPS[@]}"; do
+      [[ "${step}" == "${requested_step}" ]] && valid=true
+    done
+    [[ "${valid}" == true ]] || {
+      printf 'Step %s does not belong to stage %s.\n' "${requested_step}" "${STAGE_NAME}" >&2
+      return 64
+    }
+
+    local mutation_marker="${REPORT_BASE}/.state/executed-${STAGE_NAME}-${requested_step}"
+    local guard_rerun=false
+    case "${STAGE_NAME}:${requested_step}" in
+      config:1.1 | build:2.2 | build:2.6 | production-release:4.5 | production-release:4.7) guard_rerun=true ;;
+    esac
+    if [[ "${guard_rerun}" == true && -f "${mutation_marker}" ]]; then
+      printf 'Step %s was already executed for this release at %s. Re-verification still blocks; wait for propagation instead of repeating the mutation. Remove %s only after confirming an explicit retry is required.\n' \
+        "${requested_step}" "$(<"${mutation_marker}")" "${mutation_marker}" >&2
+      return 2
+    fi
+
+    ocr_describe_action "${requested_step}"
+    if [[ "${OCR_RUN_THROUGH:-}" != true ]]; then
+      local expected="execute ${VERSION} ${STAGE_NAME} ${requested_step}"
+      local answer=''
+      if [[ -z "${OCR_VERIFY_STEP:-}" && -z "${_ocr_skip_arg}" ]]; then
+        printf 'Explicit approval required. Type exactly: %s OR Type "s" to skip this step and proceed, OR press Enter to stop:\n> ' "${expected}" >&2
+      else
+        printf 'Explicit approval required. Type exactly: %s\n> ' "${expected}" >&2
+      fi
+      IFS= read -r answer </dev/tty 2>/dev/null || true
+      if [[ "${answer}" == "${expected}" ]]; then
+        : # approved — fall through to execute
+      elif [[ "${answer}" == [sS] && -z "${OCR_VERIFY_STEP:-}" && -z "${_ocr_skip_arg}" ]]; then
+        _ocr_skipped="${_ocr_skipped:+${_ocr_skipped},}${requested_step}"
+        _ocr_skip_arg=''
+        continue
+      else
+        printf 'Execution approval not granted; no mutation was run.\n' >&2
+        return 3
+      fi
+    fi
+    ocr_execute_step "${requested_step}"
+    if [[ "${guard_rerun}" == true ]]; then
+      date +"${TZ_FMT}" >"${mutation_marker}"
+    fi
+    local post_verify_rc skip_input
+    set +e
+    OCR_SKIP_PROMPT=1 OCR_SKIP_STEPS="${_eff_skip}" "${STAGE_DIR}/verify.sh" "${version}"
+    post_verify_rc=$?
+    set -e
+    if [[ ${post_verify_rc} -eq 2 && -z "${_ocr_skip_arg}" ]]; then
+      printf 'Type "s" to skip this step and proceed, or press Enter to stop: ' >&2
+      IFS= read -r skip_input </dev/tty 2>/dev/null || true
+      if [[ "${skip_input}" == [sS] ]]; then
+        local _post_blocker
+        _post_blocker=$(ocr_state_blocking_step "${STAGE_NAME}") || true
+        if [[ -n "${_post_blocker}" ]]; then
+          _ocr_skipped="${_ocr_skipped:+${_ocr_skipped},}${_post_blocker}"
+        fi
+        _ocr_skip_arg=''
+        continue
+      fi
+      return ${post_verify_rc}
+    elif [[ ${post_verify_rc} -ne 0 ]]; then
+      return ${post_verify_rc}
+    fi
+    # Step executed and post-verify passed — done
+    return 0
   done
-  [[ "${valid}" == true ]] || {
-    printf 'Step %s does not belong to stage %s.\n' "${requested_step}" "${STAGE_NAME}" >&2
-    return 64
-  }
-
-  local mutation_marker="${REPORT_BASE}/.state/executed-${STAGE_NAME}-${requested_step}"
-  local guard_rerun=false
-  case "${STAGE_NAME}:${requested_step}" in
-    config:1.1 | build:2.2 | build:2.6 | production-release:4.5 | production-release:4.7) guard_rerun=true ;;
-  esac
-  if [[ "${guard_rerun}" == true && -f "${mutation_marker}" ]]; then
-    printf 'Step %s was already executed for this release at %s. Re-verification still blocks; wait for propagation instead of repeating the mutation. Remove %s only after confirming an explicit retry is required.\n' \
-      "${requested_step}" "$(<"${mutation_marker}")" "${mutation_marker}" >&2
-    return 2
-  fi
-
-  ocr_describe_action "${requested_step}"
-  if [[ "${OCR_RUN_THROUGH:-}" != true ]]; then
-    local expected="execute ${VERSION} ${STAGE_NAME} ${requested_step}"
-    local answer=''
-    if [[ -z "${OCR_VERIFY_STEP:-}" && -z "${2:-}" ]]; then
-      printf 'Explicit approval required. Type exactly: %s OR Type "s" to skip this step and proceed, OR press Enter to stop:\n> ' "${expected}" >&2
-    else
-      printf 'Explicit approval required. Type exactly: %s\n> ' "${expected}" >&2
-    fi
-    IFS= read -r answer </dev/tty 2>/dev/null || true
-    if [[ "${answer}" == "${expected}" ]]; then
-      : # approved — fall through to execute
-    elif [[ "${answer}" == [sS] && -z "${OCR_VERIFY_STEP:-}" && -z "${2:-}" ]]; then
-      return 0
-    else
-      printf 'Execution approval not granted; no mutation was run.\n' >&2
-      return 3
-    fi
-  fi
-  ocr_execute_step "${requested_step}"
-  if [[ "${guard_rerun}" == true ]]; then
-    date +"${TZ_FMT}" >"${mutation_marker}"
-  fi
-  local post_verify_rc skip_input
-  set +e
-  OCR_SKIP_PROMPT=1 "${STAGE_DIR}/verify.sh" "${version}"
-  post_verify_rc=$?
-  set -e
-  if [[ ${post_verify_rc} -eq 2 && -z "${2:-}" ]]; then
-    printf 'Type "s" to skip this step and proceed, or press Enter to stop: ' >&2
-    IFS= read -r skip_input </dev/tty 2>/dev/null || true
-    if [[ "${skip_input}" == [sS] ]]; then
-      return 0
-    fi
-    return ${post_verify_rc}
-  elif [[ ${post_verify_rc} -ne 0 ]]; then
-    return ${post_verify_rc}
-  fi
 }
