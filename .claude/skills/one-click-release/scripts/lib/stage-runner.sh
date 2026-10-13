@@ -292,11 +292,6 @@ ocr_execute_stage() {
     case "${STAGE_NAME}:${requested_step}" in
       config:1.1 | build:2.2 | build:2.6 | production-release:4.5 | production-release:4.7) guard_rerun=true ;;
     esac
-    if [[ "${guard_rerun}" == true && -f "${mutation_marker}" ]]; then
-      printf 'Step %s was already executed for this release at %s. Re-verification still blocks; wait for propagation instead of repeating the mutation. Remove %s only after confirming an explicit retry is required.\n' \
-        "${requested_step}" "$(<"${mutation_marker}")" "${mutation_marker}" >&2
-      return 2
-    fi
 
     ocr_describe_action "${requested_step}"
     if [[ "${OCR_RUN_THROUGH:-}" != true ]]; then
@@ -309,7 +304,7 @@ ocr_execute_stage() {
       fi
       IFS= read -r answer </dev/tty 2>/dev/null || true
       if [[ "${answer}" == "${expected}" ]]; then
-        : # approved — fall through to execute
+        : # approved — fall through to guard check and execute
       elif [[ "${answer}" == [sS] && -z "${OCR_VERIFY_STEP:-}" && -z "${_ocr_skip_arg}" ]]; then
         _ocr_skipped="${_ocr_skipped:+${_ocr_skipped},}${requested_step}"
         _ocr_skip_arg=''
@@ -318,6 +313,11 @@ ocr_execute_stage() {
         printf 'Execution approval not granted; no mutation was run.\n' >&2
         return 3
       fi
+    fi
+    if [[ "${guard_rerun}" == true && -f "${mutation_marker}" ]]; then
+      printf 'Step %s was already executed for this release at %s. Re-verification still blocks; wait for propagation instead of repeating the mutation. Remove %s only after confirming an explicit retry is required.\n' \
+        "${requested_step}" "$(<"${mutation_marker}")" "${mutation_marker}" >&2
+      return 2
     fi
     ocr_execute_step "${requested_step}"
     if [[ "${guard_rerun}" == true ]]; then
