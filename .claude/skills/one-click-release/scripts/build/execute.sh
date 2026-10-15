@@ -10,7 +10,9 @@ source "${SCRIPTS_DIR}/lib/release.sh"
 source "${SCRIPTS_DIR}/lib/stage-runner.sh"
 
 STAGE_NAME=build
-STAGE_STEPS=(2.1 2.2 2.3 2.4 2.5 2.6 2.7 2.8 2.9 2.10 2.11 2.12 2.13 2.14)
+STAGE_STEPS=(2.1 2.2 2.3 2.4 2.5 2.6 2.7 2.8 2.9 2.10 2.11 2.12 2.13)
+# Steps that require human judgment and must not be auto-executed in run-through mode.
+STAGE_RUN_THROUGH_MANUAL_STEPS=(2.1 2.2 2.3)
 
 ocr_describe_action() {
   case "$1" in
@@ -22,12 +24,11 @@ ocr_describe_action() {
     2.6) printf 'Trigger rebuild commits for repositories stale in the core snapshot.\n' ;;
     2.7) printf 'Process nudge PRs, including conflict consolidation when required.\n' ;;
     2.8) printf 'Gate: re-verify snapshot and digest checks both pass.\n' ;;
-    2.9) printf 'Apply Konflux resource YAMLs from hack repo and verify ReleasePlan version tags.\n' ;;
-    2.10) printf 'Create the core stage Release CR from the latest verified snapshot.\n' ;;
-    2.11) printf 'Run staging operator-update-images, merge its verified PR, and render the staging catalog.\n' ;;
-    2.12) printf 'Trigger bundle and index rebuilds for stale FBC snapshots.\n' ;;
-    2.13) printf 'Create the bundle stage Release CR after the core stage release succeeds.\n' ;;
-    2.14) printf 'Create index stage Release CRs after the bundle stage release succeeds.\n' ;;
+    2.9) printf 'Create the core stage Release CR from the latest verified snapshot.\n' ;;
+    2.10) printf 'Run staging operator-update-images, merge its verified PR, and render the staging catalog.\n' ;;
+    2.11) printf 'Trigger bundle and index rebuilds for stale FBC snapshots.\n' ;;
+    2.12) printf 'Create the bundle stage Release CR after the core stage release succeeds.\n' ;;
+    2.13) printf 'Create index stage Release CRs after the bundle stage release succeeds.\n' ;;
   esac
 }
 
@@ -184,11 +185,12 @@ create_stage_release() {
     printf '%s application not found.\n' "${kind}" >&2
     return 2
   }
-  # For core releases, use the pinned snapshot from .state/stage-core-snapshot
-  if [[ "${kind}" == core && -f "${REPORT_BASE}/.state/stage-core-snapshot" ]]; then
-    snapshot=$(<"${REPORT_BASE}/.state/stage-core-snapshot")
+  # Use pinned snapshot if it exists (from a prior run), otherwise get latest
+  if [[ -f "${REPORT_BASE}/.state/stage-${app}-snapshot" ]]; then
+    snapshot=$(<"${REPORT_BASE}/.state/stage-${app}-snapshot")
+  else
+    snapshot=$(ocr_latest_snapshot "${app}")
   fi
-  [[ -n "${snapshot}" ]] || snapshot=$(ocr_latest_snapshot "${app}")
   [[ -n "${snapshot}" ]] || {
     printf 'No snapshot for %s.\n' "${app}" >&2
     return 2
@@ -220,36 +222,12 @@ create_stage_release() {
   fi
   path="${REPORT_BASE}/manifest/stage/release-${VERSION}-${kind}-stage.yaml"
   ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
-  ocr_create_release_manifest "${path}"
+  ocr_create_release_manifest "${path}" || return 2
+  # Pin snapshot only after successful release creation to avoid stale snapshots on retry
+  printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${app}-snapshot"
 }
 
 execute_2_9() {
-  ocr_require_konflux || return 2
-  local temp
-  temp=$(mktemp -d)
-  git clone --depth 1 https://github.com/openshift-pipelines/hack.git "${temp}/hack"
-  oc apply -R -f "${temp}/hack/.konflux/openshift-pipelines/${MM_DASHED}/" -n "${KONFLUX_NS}"
-  rm -rf "${temp}"
-  # Verify all ReleasePlans have correct version tags
-  local rps rp_count bad_count
-  rps=$(ocr_oc_get releaseplans -o json)
-  rp_count=$(jq --arg mm "${MM_DASHED}" '[.items[] | select(.metadata.name | contains($mm))] | length' <<<"${rps}")
-  ((rp_count > 0)) || {
-    printf 'No ReleasePlans found for %s.\n' "${MM_DASHED}" >&2
-    return 2
-  }
-  bad_count=$(jq --arg mm "${MM_DASHED}" --arg vtag "v${VERSION}" '
-    [.items[] | select(.metadata.name | contains($mm))
-      | select(([.spec.data.mapping.defaults.tags[]? | select(startswith($vtag))] | length) == 0)]
-    | length' <<<"${rps}")
-  if ((bad_count > 0)); then
-    printf '%d ReleasePlan(s) missing v%s in tags.\n' "${bad_count}" "${VERSION}" >&2
-    return 2
-  fi
-  printf 'Applied Konflux resources; all %d ReleasePlan(s) verified with v%s tags.\n' "${rp_count}" "${VERSION}"
-}
-
-execute_2_10() {
   ocr_require_konflux || return 2
   create_stage_release core || return $?
   # Record the core snapshot used for this release
@@ -362,7 +340,7 @@ wait_in_progress_runs() {
   done < <(jq -r '.[] | select(.status=="in_progress" or .status=="queued") | .databaseId' <<<"${runs}")
 }
 
-execute_2_11() {
+execute_2_10() {
   local id pr diff merged_pr
   wait_in_progress_runs operator-update-images.yaml
   pr=$(gh pr list --repo openshift-pipelines/operator --head "actions/update/operator-update-images-${RELEASE_BRANCH}" \
@@ -428,7 +406,7 @@ execute_2_11() {
   [[ -n "${id}" ]] && gh run watch --repo openshift-pipelines/operator "${id}"
 }
 
-execute_2_12() {
+execute_2_11() {
   ocr_require_konflux || return 2
   local apps head bundle snapshot rev stale_bundle=false stale_index=false app
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
@@ -466,7 +444,7 @@ execute_2_12() {
   printf 'All FBC snapshots are current.\n'
 }
 
-execute_2_13() {
+execute_2_12() {
   ocr_require_konflux || return 2
   successful_release_exists core stage cdn || {
     printf 'Core stage release has not succeeded.\n' >&2
@@ -475,58 +453,78 @@ execute_2_13() {
   create_stage_release bundle
 }
 
-execute_2_14() {
+create_index_stage_release() {
+  local app=$1 snapshot rp ocp path existing existing_name existing_status existing_reason
+  if [[ -f "${REPORT_BASE}/.state/stage-${app}-snapshot" ]]; then
+    snapshot=$(<"${REPORT_BASE}/.state/stage-${app}-snapshot")
+  else
+    snapshot=$(ocr_latest_snapshot "${app}")
+  fi
+  [[ -n "${snapshot}" ]] || { printf 'No snapshot for %s; skipping.\n' "${app}"; return 0; }
+  rp=$(find_release_plan "${app}" stage)
+  [[ -n "${rp}" ]] || {
+    printf 'No stage release plan for %s.\n' "${app}" >&2
+    return 2
+  }
+  existing=$(existing_release_for_snapshot "${rp}" "${snapshot}")
+  if [[ -n "${existing}" ]]; then
+    existing_name=${existing%%|*}
+    existing_status=${existing#*|}
+    existing_status=${existing_status%%|*}
+    existing_reason=${existing##*|}
+    printf 'Release %s already exists for %s (Released=%s, Reason=%s).\n' "${existing_name}" "${app}" "${existing_status}" "${existing_reason}"
+    if [[ "${existing_status}" == True ]]; then return 0; fi
+    if [[ "${existing_status}" == False ]]; then
+      if [[ "${existing_reason}" == Failed ]]; then
+        printf 'The latest attempt for %s failed; creating a retry Release CR.\n' "${app}" >&2
+      else
+        printf 'Release %s for %s is still in progress (Reason=%s); skipping.\n' "${existing_name}" "${app}" "${existing_reason}"
+        return 0
+      fi
+    else
+      printf 'Existing release %s is in an unknown state; refusing a duplicate.\n' "${existing_name}" >&2
+      return 2
+    fi
+  fi
+  ocp=${app#openshift-pipelines-index-}
+  ocp=${ocp%-"${MM_DASHED}"}
+  ocp=${ocp/-/.}
+  path="${REPORT_BASE}/manifest/stage/release-${VERSION}-index-${ocp}-stage.yaml"
+  ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
+  ocr_create_release_manifest "${path}" || return 2
+  printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${app}-snapshot"
+}
+
+execute_2_13() {
   ocr_require_konflux || return 2
   successful_release_exists bundle stage || {
     printf 'Bundle stage release has not succeeded.\n' >&2
     return 2
   }
-  local apps app snapshot rp ocp path made=0
+  local apps app pids=() apps_list=()
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
-  while IFS= read -r app; do
-    snapshot=$(ocr_latest_snapshot "${app}")
-    [[ -n "${snapshot}" ]] || continue
-    rp=$(find_release_plan "${app}" stage)
-    [[ -n "${rp}" ]] || {
-      printf 'No stage release plan for %s.\n' "${app}" >&2
-      return 2
-    }
-    local existing existing_name existing_status existing_reason
-    existing=$(existing_release_for_snapshot "${rp}" "${snapshot}")
-    if [[ -n "${existing}" ]]; then
-      existing_name=${existing%%|*}
-      existing_status=${existing#*|}
-      existing_status=${existing_status%%|*}
-      existing_reason=${existing##*|}
-      printf 'Release %s already exists for %s (Released=%s, Reason=%s).\n' "${existing_name}" "${app}" "${existing_status}" "${existing_reason}"
-      if [[ "${existing_status}" == True ]]; then
-        ((made += 1))
-        continue
-      fi
-      if [[ "${existing_status}" == False ]]; then
-        if [[ "${existing_reason}" == Failed ]]; then
-          printf 'The latest attempt for %s failed; creating a retry Release CR.\n' "${app}" >&2
-        else
-          printf 'Release %s for %s is still in progress (Reason=%s); skipping.\n' "${existing_name}" "${app}" "${existing_reason}"
-          continue
-        fi
-      else
-        printf 'Existing release %s is in an unknown state; refusing a duplicate.\n' "${existing_name}" >&2
-        return 2
-      fi
-    fi
-    ocp=${app#openshift-pipelines-index-}
-    ocp=${ocp%-"${MM_DASHED}"}
-    ocp=${ocp/-/.}
-    path="${REPORT_BASE}/manifest/stage/release-${VERSION}-index-${ocp}-stage.yaml"
-    ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
-    ocr_create_release_manifest "${path}"
-    ((made += 1))
-  done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
-  ((made > 0)) || {
-    printf 'No index applications with snapshots found.\n' >&2
+  local index_apps
+  mapfile -t index_apps < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
+  ((${#index_apps[@]} > 0)) || {
+    printf 'No index applications found.\n' >&2
     return 2
   }
+  for app in "${index_apps[@]}"; do
+    [[ -n "${app}" ]] || continue
+    apps_list+=("${app}")
+    create_index_stage_release "${app}" &
+    pids+=($!)
+  done
+  local i failed=0
+  for i in "${!pids[@]}"; do
+    if wait "${pids[$i]}"; then
+      printf 'Index stage release done for %s.\n' "${apps_list[$i]}"
+    else
+      printf 'Index release failed for %s.\n' "${apps_list[$i]}" >&2
+      failed=1
+    fi
+  done
+  ((failed == 0)) || return 2
 }
 
 execute_2_4() {
@@ -609,7 +607,7 @@ ocr_execute_step() {
     2.1) execute_2_1 ;; 2.2) execute_2_2 ;; 2.3) execute_2_3 ;; 2.4) execute_2_4 ;;
     2.5) execute_2_5 ;; 2.6) execute_2_6 ;; 2.7) execute_2_7 ;; 2.8) execute_2_8 ;;
     2.9) execute_2_9 ;; 2.10) execute_2_10 ;; 2.11) execute_2_11 ;; 2.12) execute_2_12 ;;
-    2.13) execute_2_13 ;; 2.14) execute_2_14 ;;
+    2.13) execute_2_13 ;;
   esac
 }
 

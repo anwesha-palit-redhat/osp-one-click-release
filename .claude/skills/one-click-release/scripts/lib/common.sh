@@ -3,6 +3,23 @@
 
 # Shared context, command, credential, and approval helpers.
 
+# ── Terminal colors (disabled when stdout is not a tty) ───────────────────────
+if [[ -t 1 ]]; then
+  OCR_BOLD=$'\033[1m'
+  OCR_DIM=$'\033[2m'
+  OCR_RESET=$'\033[0m'
+  OCR_RED=$'\033[0;31m'
+  OCR_GREEN=$'\033[0;32m'
+  OCR_YELLOW=$'\033[0;33m'
+  OCR_BLUE=$'\033[0;34m'
+  OCR_CYAN=$'\033[0;36m'
+  OCR_WHITE=$'\033[1;37m'
+else
+  OCR_BOLD='' OCR_DIM='' OCR_RESET=''
+  OCR_RED='' OCR_GREEN='' OCR_YELLOW=''
+  OCR_BLUE='' OCR_CYAN='' OCR_WHITE=''
+fi
+
 OCR_RC_BLOCKED=10
 OCR_RC_SKIPPED=20
 OCR_KONFLUX_NS="tekton-ecosystem-tenant"
@@ -278,22 +295,25 @@ ocr_confirm_action() {
   local stage=$1 step=$2
   local expected="execute ${VERSION} ${stage} ${step}"
   local answer=''
-  printf 'Explicit approval required. Type exactly: %s\n> ' "${expected}" >&2
+  printf '%sApproval required.%s Type exactly: %s%s%s\n> ' \
+    "${OCR_YELLOW}${OCR_BOLD}" "${OCR_RESET}" "${OCR_WHITE}" "${expected}" "${OCR_RESET}" >&2
   IFS= read -r answer || true
   [[ "${answer}" == "${expected}" ]] || {
-    printf 'Execution approval not granted; no mutation was run.\n' >&2
+    printf '%sExecution approval not granted; no mutation was run.%s\n' "${OCR_RED}" "${OCR_RESET}" >&2
     return 1
   }
 }
 
 ocr_confirm_production() {
-  [[ "${OCR_RUN_THROUGH:-}" == true ]] && return 0
+  # Production gate is never bypassed — not even in run-through mode.
+  # OCR_RUN_THROUGH only suppresses step-level prompts, not this stage gate.
   local expected="start production-release ${VERSION}"
   local answer=''
-  printf 'Production release has a separate gate. Type exactly: %s\n> ' "${expected}" >&2
+  printf '%s%s⚠  Production release gate.%s Type exactly: %s%s%s\n> ' \
+    "${OCR_BOLD}" "${OCR_RED}" "${OCR_RESET}" "${OCR_WHITE}" "${expected}" "${OCR_RESET}" >&2
   IFS= read -r answer || true
   [[ "${answer}" == "${expected}" ]] || {
-    printf 'Production approval not granted; production-release did not start.\n' >&2
+    printf '%sProduction approval not granted; production-release did not start.%s\n' "${OCR_RED}" "${OCR_RESET}" >&2
     return 1
   }
 }
@@ -367,6 +387,47 @@ ocr_operator_revision_is_generated() {
   files_ok=$(jq -e '[.files[].filename] | length > 0 and all(.[];
     test("^(\\.konflux/olm-catalog/|olm/|bundle[/.]|nightly-bundle\\.)"))' <<<"${compare}" 2>/dev/null) || return 1
   [[ "${actors_ok}" == true && "${files_ok}" == true ]]
+}
+
+# Verify that FBC source files at a given revision reference the expected core
+# operator image digest.  Returns 0 if the digest is found, 1 if not (warning
+# only — callers decide whether to block).
+ocr_verify_fbc_references_core_image() {
+  local fbc_rev=$1 core_image=$2 app_label=$3
+  local core_digest tree_json
+
+  # Extract the sha256 digest from the core image reference
+  if [[ "${core_image}" == *@sha256:* ]]; then
+    core_digest=${core_image##*@sha256:}
+  else
+    printf '%s⚠ WARNING:%s %s — core image has no sha256 digest; skipping FBC image check\n' \
+      "${OCR_YELLOW}${OCR_BOLD}" "${OCR_RESET}" "${app_label}" >&2
+    return 0
+  fi
+
+  # Fetch the git tree at the FBC revision, filtering to FBC-relevant paths
+  tree_json=$(gh api "repos/openshift-pipelines/operator/git/trees/${fbc_rev}?recursive=1" \
+    --jq '[.tree[] | select(.path | test("^\\.konflux/olm-catalog/|^bundle/|^bundle\\.")) | .path]' 2>/dev/null) || {
+    printf '%s⚠ WARNING:%s %s — unable to fetch git tree at %s; skipping FBC image check\n' \
+      "${OCR_YELLOW}${OCR_BOLD}" "${OCR_RESET}" "${app_label}" "${fbc_rev:0:12}" >&2
+    return 0
+  }
+
+  # Read each FBC-relevant file and search for the core digest
+  local path file_content
+  while IFS= read -r path; do
+    [[ -n "${path}" ]] || continue
+    file_content=$(gh api "repos/openshift-pipelines/operator/contents/${path}?ref=${fbc_rev}" \
+      --jq '.content' 2>/dev/null | base64 -d 2>/dev/null) || continue
+    if grep -qF "${core_digest}" <<<"${file_content}"; then
+      return 0
+    fi
+  done < <(jq -r '.[]' <<<"${tree_json}" 2>/dev/null)
+
+  # Digest not found — warn but do not block
+  printf '%s⚠ WARNING:%s %s — FBC at revision %s does not reference core image digest sha256:%s\n' \
+    "${OCR_YELLOW}${OCR_BOLD}" "${OCR_RESET}" "${app_label}" "${fbc_rev:0:12}" "${core_digest:0:12}" >&2
+  return 1
 }
 
 ocr_normalize_stage() {

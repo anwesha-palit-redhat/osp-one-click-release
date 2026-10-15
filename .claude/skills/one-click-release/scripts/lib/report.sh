@@ -100,7 +100,7 @@ ocr_report_write() {
     printf 'REPORT_FILE=%q\n' "${OCR_REPORT_FILE}"
   } >"${OCR_STATE_FILE}"
 
-  printf 'Report written to: %s\n' "$(ocr_report_path_display "${OCR_REPORT_FILE}")"
+  printf '%s📄 Report written to:%s %s\n' "${OCR_CYAN}" "${OCR_RESET}" "$(ocr_report_path_display "${OCR_REPORT_FILE}")"
   rm -f "${OCR_REPORT_ROWS}"
 }
 

@@ -30,7 +30,7 @@ ocr_step_title() {
     1.9) printf '%s' 'p12n-opc sync' ;;
     1.10) printf '%s' 'serve-tkn-cli submodules' ;;
     1.11) printf '%s' 'CLI product version config' ;;
-    1.12) printf '%s' 'CLI CDN RP/RPA' ;;
+    1.12) printf '%s' 'RP version tags & CDN handshake' ;;
   esac
 }
 
@@ -504,48 +504,87 @@ verify_1_11() {
 }
 
 verify_1_12() {
-  ocr_require_gitlab || return $?
-  local base rpa rp_sub auto rpa_count rp_count auto_count
-  local mm_dot="${MAJOR_MINOR}"  # e.g. 1.23
+  ocr_require_konflux || return $?
 
-  base="${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data/repository/tree"
+  # ── Part 1: CDN RPAs exist in konflux-release-data (GitLab) ──
+  if [[ -n "${GITLAB_TOKEN:-}" ]]; then
+    local gitlab_url="${GITLAB_URL:-https://gitlab.cee.redhat.com}"
+    local rpa_project="releng%2Fkonflux-release-data"
+    local rpa_dir="config/kflux-prd-rh02.0fk9.p1/product/ReleasePlanAdmission/tekton-ecosystem"
+    local rpa_prod_file="openshift-pipelines-${MM_DASHED}-core-cdn-prod.yaml"
+    local rpa_stage_file="openshift-pipelines-${MM_DASHED}-core-cdn-stage.yaml"
+    local rpa_prod_code rpa_stage_code
+    rpa_prod_code=$(curl -s -o /dev/null -w '%{http_code}' \
+      --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+      "${gitlab_url}/api/v4/projects/${rpa_project}/repository/files/$(printf '%s' "${rpa_dir}/${rpa_prod_file}" | sed 's|/|%2F|g')/raw?ref=main")
+    rpa_stage_code=$(curl -s -o /dev/null -w '%{http_code}' \
+      --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+      "${gitlab_url}/api/v4/projects/${rpa_project}/repository/files/$(printf '%s' "${rpa_dir}/${rpa_stage_file}" | sed 's|/|%2F|g')/raw?ref=main")
 
-  # RPA check — flat files, works as before
-  rpa=$(ocr_gitlab_get "${base}?path=config/kflux-prd-rh02.0fk9.p1/product/ReleasePlanAdmission/tekton-ecosystem&ref=main&per_page=100") || return "${OCR_RC_BLOCKED}"
-  rpa_count=$(jq --arg mm "${MM_DASHED}" '[.[] | select(.name | contains($mm) and contains("cdn"))] | length' <<<"${rpa}")
+    if [[ "${rpa_prod_code}" != "200" || "${rpa_stage_code}" != "200" ]]; then
+      STEP_DETAILS="CDN RPAs missing in konflux-release-data (prod=${rpa_prod_code}, stage=${rpa_stage_code})"
+      return "${OCR_RC_BLOCKED}"
+    fi
+  fi
 
-  # Tenant RP check — look inside the version subdirectory for multi-doc YAMLs
-  # containing CDN ReleasePlan documents
-  local tenant_subdir="tenants-config/cluster/kflux-prd-rh02/tenants/tekton-ecosystem-tenant/openshift-pipelines-${mm_dot}"
-  local encoded_subdir
-  encoded_subdir=$(printf '%s' "${tenant_subdir}" | sed 's|/|%2F|g')
+  # ── Part 2: ALL ReleasePlans have correct version tags ──
+  local rps rp_count bad_names bad_count
+  rps=$(ocr_oc_get releaseplans.appstudio.redhat.com -o json 2>/dev/null) || {
+    STEP_DETAILS='unable to query ReleasePlans'
+    return "${OCR_RC_BLOCKED}"
+  }
+  rp_count=$(jq --arg mm "${MM_DASHED}" \
+    '[.items[] | select(.metadata.name | contains($mm))] | length' <<<"${rps}")
+  ((rp_count > 0)) || {
+    STEP_DETAILS="no ReleasePlans found for ${MM_DASHED}"
+    return "${OCR_RC_BLOCKED}"
+  }
+  bad_names=$(jq -r --arg mm "${MM_DASHED}" --arg vtag "v${VERSION}" --arg ver "${VERSION}" '
+    [.items[] | select(.metadata.name | contains($mm))
+      | select(
+          ([.spec.data.mapping.defaults.tags[]? | select(startswith($vtag))] | length) == 0
+          and
+          ([.spec.tenantPipeline.params[]? | select(.name == "release_version" and (.value | startswith($vtag)))] | length) == 0
+          and
+          ((.spec.data.mapping.defaults.contentGateway.productVersionName // "") | startswith($ver) | not)
+        )]
+    | .[].metadata.name' <<<"${rps}")
+  if [[ -n "${bad_names}" ]]; then
+    bad_count=$(wc -l <<<"${bad_names}" | tr -d ' ')
+    STEP_DETAILS="${bad_count} ReleasePlan(s) missing v${VERSION} tag: ${bad_names//$'\n'/, }"
+    return "${OCR_RC_BLOCKED}"
+  fi
 
-  rp_count=0
-  rp_sub=$(ocr_gitlab_get "${base}?path=$(printf '%s' "${tenant_subdir}" | jq -sRr @uri)&ref=main&per_page=100" 2>/dev/null) || rp_sub="[]"
+  # ── Part 3: CDN RP/RPA handshake completed ──
+  local cdn_rps cdn_rp active handshake_ok=true handshake_details=''
+  cdn_rps=$(jq -r --arg mm "${MM_DASHED}" '
+    .items[] | select(.metadata.name | (contains($mm) and contains("cdn")))
+    | .metadata.name' <<<"${rps}")
 
-  # For each YAML file in the tenant subdirectory, fetch its content
-  # and count YAML documents whose metadata.name contains "cdn"
-  local rp_file rp_file_path rp_content cdn_docs
-  while IFS= read -r rp_file; do
-    [[ -n "${rp_file}" ]] || continue
-    rp_file_path="${tenant_subdir}/${rp_file}"
-    local encoded_path
-    encoded_path=$(printf '%s' "${rp_file_path}" | sed 's|/|%2F|g')
-    rp_content=$(ocr_gitlab_get \
-      "${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data/repository/files/${encoded_path}/raw?ref=main" \
-      2>/dev/null) || continue
-    # Count YAML documents with "cdn" in metadata.name
-    cdn_docs=$(grep -c "name:.*cdn" <<<"${rp_content}" || true)
-    rp_count=$((rp_count + cdn_docs))
-  done < <(jq -r '.[] | select(.type == "blob" and (.name | endswith(".yaml"))) | .name' <<<"${rp_sub}")
+  if [[ -z "${cdn_rps}" ]]; then
+    STEP_DETAILS="${rp_count} RPs verified with v${VERSION} tags; no CDN ReleasePlans found"
+    return "${OCR_RC_BLOCKED}"
+  fi
 
-  # Auto-generated check — keep as-is (flat directory)
-  auto=$(ocr_gitlab_get "${base}?path=tenants-config/auto-generated/cluster/kflux-prd-rh02/tenants/tekton-ecosystem-tenant&ref=main&per_page=100") || return "${OCR_RC_BLOCKED}"
-  auto_count=$(jq --arg mm "${MM_DASHED}" '[.[] | select(.name | contains($mm) and contains("cdn"))] | length' <<<"${auto}")
+  while IFS= read -r cdn_rp; do
+    [[ -n "${cdn_rp}" ]] || continue
+    active=$(jq -r --arg name "${cdn_rp}" '
+      .items[] | select(.metadata.name == $name)
+      | .status.releasePlanAdmission.active // empty' <<<"${rps}")
+    if [[ "${active}" != "true" ]]; then
+      handshake_ok=false
+      handshake_details+=" ${cdn_rp}:inactive"
+    fi
+  done <<< "${cdn_rps}"
 
-  STEP_DETAILS="CDN RPAs: ${rpa_count}; tenant RPs: ${rp_count}; auto-generated RPs: ${auto_count}"
-  ((rpa_count >= 2 && rp_count >= 1)) || return "${OCR_RC_BLOCKED}"
+  if [[ "${handshake_ok}" != true ]]; then
+    STEP_DETAILS="${rp_count} RPs verified with v${VERSION} tags; CDN RP/RPA handshake not active:${handshake_details}"
+    return "${OCR_RC_BLOCKED}"
+  fi
+
+  STEP_DETAILS="${rp_count} RPs verified with v${VERSION} tags; CDN RP/RPA handshakes active"
 }
+
 
 ocr_verify_step() {
   case "$1" in

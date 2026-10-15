@@ -43,8 +43,8 @@ ocr_verify_stage() {
       20)
         ocr_report_add "${step}" "${title}" 'SKIPPED' "${STEP_DETAILS:-credential unavailable}" "${STEP_LINKS:-—}"
         if [[ -z "${OCR_VERIFY_STEP:-}" && -z "${OCR_SKIP_PROMPT:-}" ]]; then
-          printf 'BLOCKED: step %s — %s\n' "${step}" "${STEP_DETAILS:-credential unavailable}" >&2
-          printf 'Type "s" to skip this step and proceed, or press Enter to stop: ' >&2
+          printf '%s⚠ BLOCKED:%s step %s — %s\n' "${OCR_YELLOW}${OCR_BOLD}" "${OCR_RESET}" "${step}" "${STEP_DETAILS:-credential unavailable}" >&2
+          printf '%sType "s" to skip this step and proceed, or press Enter to stop:%s ' "${OCR_DIM}" "${OCR_RESET}" >&2
           IFS= read -r skip_input </dev/tty 2>/dev/null || true
           if [[ "${skip_input}" == [sS] ]]; then
             continue
@@ -58,8 +58,8 @@ ocr_verify_stage() {
       10 | *)
         ocr_report_add "${step}" "${title}" 'ACTION NEEDED' "${STEP_DETAILS:-verification failed}" "${STEP_LINKS:-—}"
         if [[ -z "${OCR_VERIFY_STEP:-}" && -z "${OCR_SKIP_PROMPT:-}" ]]; then
-          printf 'BLOCKED: step %s — %s\n' "${step}" "${STEP_DETAILS:-verification failed}" >&2
-          printf 'Type "s" to skip this step and proceed, or press Enter to stop: ' >&2
+          printf '%s✖ BLOCKED:%s step %s — %s\n' "${OCR_RED}${OCR_BOLD}" "${OCR_RESET}" "${step}" "${STEP_DETAILS:-verification failed}" >&2
+          printf '%sType "s" to skip this step and proceed, or press Enter to stop:%s ' "${OCR_DIM}" "${OCR_RESET}" >&2
           IFS= read -r skip_input </dev/tty 2>/dev/null || true
           if [[ "${skip_input}" == [sS] ]]; then
             continue
@@ -76,11 +76,11 @@ ocr_verify_stage() {
   ocr_report_write
   if [[ "${blocked}" == true ]]; then
     if [[ "${prompt_shown}" != true ]]; then
-      printf 'BLOCKED: step %s — %s\n' "${OCR_BLOCKING_STEP}" "${OCR_BLOCKING_DETAILS}" >&2
+      printf '%s✖ BLOCKED:%s step %s — %s\n' "${OCR_RED}${OCR_BOLD}" "${OCR_RESET}" "${OCR_BLOCKING_STEP}" "${OCR_BLOCKING_DETAILS}" >&2
     fi
     return 2
   fi
-  printf '%s stage verified.\n' "${STAGE_NAME}"
+  printf '%s✔ %s stage verified.%s\n' "${OCR_GREEN}${OCR_BOLD}" "${STAGE_NAME}" "${OCR_RESET}"
 }
 
 ocr_run_through_stage() {
@@ -97,6 +97,15 @@ ocr_run_through_stage() {
     printf 'Cannot parse STAGE_STEPS from %s/verify.sh\n' "${stage_name}" >&2
     return 64
   fi
+
+  # Extract manual-only steps from the stage's execute script (if declared).
+  # These are skipped in run-through mode without attempting auto-execute.
+  local -a _manual_steps=()
+  local _manual_line
+  _manual_line=$(grep -m1 '^STAGE_RUN_THROUGH_MANUAL_STEPS=' "${scripts_dir}/${stage_name}/execute.sh" 2>/dev/null || true)
+  if [[ "${_manual_line}" =~ ^STAGE_RUN_THROUGH_MANUAL_STEPS=\( ]]; then
+    eval "_manual_steps=${_manual_line#*=}"
+  fi
   eval "${_steps_line}"
   local -a steps=("${STAGE_STEPS[@]}")
 
@@ -107,9 +116,12 @@ ocr_run_through_stage() {
   start_time=$(date +%s)
   step_count=${#steps[@]}
 
-  printf '\n══════════════════════════════════════════════════════════\n'
-  printf '  run-through: %s (%d steps)\n' "${stage_name}" "${step_count}"
-  printf '══════════════════════════════════════════════════════════\n\n'
+  printf '\n%s╔══════════════════════════════════════════════════════════╗%s\n' "${OCR_CYAN}" "${OCR_RESET}"
+  printf '%s║%s  %srun-through:%s %s%s%s %s(%d steps)%s\n' \
+    "${OCR_CYAN}" "${OCR_RESET}" "${OCR_BOLD}" "${OCR_RESET}" \
+    "${OCR_WHITE}" "${stage_name}" "${OCR_RESET}" \
+    "${OCR_DIM}" "${step_count}" "${OCR_RESET}"
+  printf '%s╚══════════════════════════════════════════════════════════╝%s\n\n' "${OCR_CYAN}" "${OCR_RESET}"
 
   local step skip skip_match verify_rc exec_rc retry
 
@@ -117,15 +129,18 @@ ocr_run_through_stage() {
     # Check if step should be skipped (respects --skip / OCR_SKIP_STEPS).
     skip_match=false
     if [[ -n "${OCR_SKIP_STEPS:-}" ]]; then
-      local IFS=','
+      local _ifs_save="${IFS}"
+      IFS=','
       for skip in ${OCR_SKIP_STEPS}; do
         [[ "${skip}" == "${step}" ]] && skip_match=true
       done
-      unset IFS
+      IFS="${_ifs_save}"
     fi
 
     if [[ "${skip_match}" == true ]]; then
-      printf '  [%s] SKIPPED (by --skip)\n' "${step}"
+      printf '  %s[%s]%s %sSKIPPED%s %s(by --skip)%s\n' \
+        "${OCR_DIM}" "${step}" "${OCR_RESET}" \
+        "${OCR_YELLOW}" "${OCR_RESET}" "${OCR_DIM}" "${OCR_RESET}"
       result_steps+=("${step}")
       result_statuses+=("SKIPPED")
       continue
@@ -137,24 +152,63 @@ ocr_run_through_stage() {
       "${scripts_dir}/${stage_name}/verify.sh" "${version}" >/dev/null 2>&1 || verify_rc=$?
 
     if [[ ${verify_rc} -eq 0 ]]; then
-      printf '  [%s] DONE\n' "${step}"
+      printf '  %s[%s]%s %s✔ DONE%s\n' \
+        "${OCR_DIM}" "${step}" "${OCR_RESET}" "${OCR_GREEN}" "${OCR_RESET}"
       result_steps+=("${step}")
       result_statuses+=("DONE")
       done_count=$((done_count + 1))
       continue
     fi
 
+    # OCR_RC_SKIPPED (20): step requires credentials or context not available — treat as SKIPPED,
+    # never attempt auto-execute or poll (it will never become DONE without external action).
+    if [[ ${verify_rc} -eq 20 ]]; then
+      printf '  %s[%s]%s %sSKIPPED%s %s(credential/context unavailable)%s\n' \
+        "${OCR_DIM}" "${step}" "${OCR_RESET}" \
+        "${OCR_YELLOW}" "${OCR_RESET}" "${OCR_DIM}" "${OCR_RESET}"
+      result_steps+=("${step}")
+      result_statuses+=("SKIPPED")
+      continue
+    fi
+
+    # Check if this step requires human action and must be skipped in run-through.
+    local _is_manual=false _m
+    for _m in "${_manual_steps[@]+"${_manual_steps[@]}"}"; do
+      [[ "${_m}" == "${step}" ]] && _is_manual=true && break
+    done
+    if [[ "${_is_manual}" == true ]]; then
+      printf '  %s[%s]%s %sSKIPPED%s %s(manual step — handle before running)%s\n' \
+        "${OCR_DIM}" "${step}" "${OCR_RESET}" \
+        "${OCR_YELLOW}" "${OCR_RESET}" "${OCR_DIM}" "${OCR_RESET}"
+      result_steps+=("${step}")
+      result_statuses+=("SKIPPED")
+      continue
+    fi
+
     # Step is blocked — auto-execute if execute.sh exists (no approval prompt).
     if [[ -x "${scripts_dir}/${stage_name}/execute.sh" ]]; then
-      printf '  [%s] BLOCKED — auto-executing...\n' "${step}"
+      printf '  %s[%s]%s %s⚡ BLOCKED%s — auto-executing...\n' \
+        "${OCR_DIM}" "${step}" "${OCR_RESET}" "${OCR_RED}" "${OCR_RESET}"
       exec_rc=0
       OCR_RUN_THROUGH=true OCR_SKIP_PROMPT=1 \
         "${scripts_dir}/${stage_name}/execute.sh" "${version}" "${step}" 2>&1 || exec_rc=$?
-      if [[ ${exec_rc} -ne 0 ]]; then
-        printf '  [%s] execute exited %d — polling for completion\n' "${step}" "${exec_rc}"
+      # Exit code 2 from execute means a non-retryable failure (e.g. code freeze still active).
+      # Stop immediately rather than polling forever.
+      if [[ ${exec_rc} -eq 2 ]]; then
+        printf '  %s[%s]%s %s✖ FAILED%s — execute reported a non-retryable failure — stopping run-through\n' \
+          "${OCR_DIM}" "${step}" "${OCR_RESET}" "${OCR_RED}${OCR_BOLD}" "${OCR_RESET}" >&2
+        result_steps+=("${step}")
+        result_statuses+=("FAILED")
+        failed=true
+        break
+      elif [[ ${exec_rc} -ne 0 ]]; then
+        printf '  %s[%s]%s execute exited %d — polling for completion\n' \
+          "${OCR_DIM}" "${step}" "${OCR_RESET}" "${exec_rc}"
       fi
     else
-      printf '  [%s] BLOCKED (verify-only) — polling for completion\n' "${step}"
+      printf '  %s[%s]%s %s⚡ BLOCKED%s %s(verify-only)%s — polling for completion\n' \
+        "${OCR_DIM}" "${step}" "${OCR_RESET}" \
+        "${OCR_RED}" "${OCR_RESET}" "${OCR_DIM}" "${OCR_RESET}"
     fi
 
     # Polling loop: re-verify until DONE or timeout.
@@ -165,24 +219,35 @@ ocr_run_through_stage() {
         "${scripts_dir}/${stage_name}/verify.sh" "${version}" >/dev/null 2>&1 || verify_rc=$?
 
       if [[ ${verify_rc} -eq 0 ]]; then
-        printf '  [%s] DONE (after %d retries)\n' "${step}" "${retry}"
+        printf '  %s[%s]%s %s✔ DONE%s %s(after %d retries)%s\n' \
+          "${OCR_DIM}" "${step}" "${OCR_RESET}" \
+          "${OCR_GREEN}" "${OCR_RESET}" "${OCR_DIM}" "${retry}" "${OCR_RESET}"
         result_steps+=("${step}")
         result_statuses+=("DONE")
         done_count=$((done_count + 1))
         break
       fi
+      if [[ ${verify_rc} -eq 20 ]]; then
+        printf '  %s[%s]%s %sSKIPPED%s %s(credential/context unavailable after %d retries)%s\n' \
+          "${OCR_DIM}" "${step}" "${OCR_RESET}" \
+          "${OCR_YELLOW}" "${OCR_RESET}" "${OCR_DIM}" "${retry}" "${OCR_RESET}"
+        result_steps+=("${step}")
+        result_statuses+=("SKIPPED")
+        break
+      fi
 
       retry=$((retry + 1))
       if [[ ${retry} -ge ${max_retries} ]]; then
-        printf '  [%s] TIMED OUT after %d retries\n' "${step}" "${max_retries}" >&2
+        printf '  %s[%s]%s %s⏱ TIMED OUT%s after %d retries\n' \
+          "${OCR_DIM}" "${step}" "${OCR_RESET}" "${OCR_RED}${OCR_BOLD}" "${OCR_RESET}" "${max_retries}" >&2
         result_steps+=("${step}")
         result_statuses+=("TIMED_OUT")
         failed=true
         break
       fi
 
-      printf '  [%s] still blocked — retry %d/%d (waiting %ds)\n' \
-        "${step}" "${retry}" "${max_retries}" "${wait_interval}"
+      printf '  %s[%s] still blocked — retry %d/%d (waiting %ds)%s\n' \
+        "${OCR_DIM}" "${step}" "${retry}" "${max_retries}" "${wait_interval}" "${OCR_RESET}"
       sleep "${wait_interval}"
     done
 
@@ -196,18 +261,30 @@ ocr_run_through_stage() {
   end_time=$(date +%s)
   elapsed_s=$((end_time - start_time))
 
-  printf '\n══════════════════════════════════════════════════════════\n'
-  printf '  %s — run-through summary\n' "${stage_name}"
-  printf '══════════════════════════════════════════════════════════\n'
-  local i
+  printf '\n%s╔══════════════════════════════════════════════════════════╗%s\n' "${OCR_CYAN}" "${OCR_RESET}"
+  printf '%s║%s  %s%s — run-through summary%s\n' \
+    "${OCR_CYAN}" "${OCR_RESET}" "${OCR_BOLD}" "${stage_name}" "${OCR_RESET}"
+  printf '%s╠══════════════════════════════════════════════════════════╣%s\n' "${OCR_CYAN}" "${OCR_RESET}"
+  local i status_color status_icon
   for ((i = 0; i < ${#result_steps[@]}; i++)); do
-    printf '    [%-5s] %s\n' "${result_steps[i]}" "${result_statuses[i]}"
+    case "${result_statuses[i]}" in
+      DONE)     status_color="${OCR_GREEN}";             status_icon="✔" ;;
+      SKIPPED)  status_color="${OCR_YELLOW}";            status_icon="–" ;;
+      FAILED)   status_color="${OCR_RED}${OCR_BOLD}";   status_icon="✖" ;;
+      TIMED_OUT) status_color="${OCR_RED}${OCR_BOLD}";  status_icon="⏱" ;;
+      *)        status_color="${OCR_WHITE}";             status_icon=" " ;;
+    esac
+    printf '  %s  %-6s%s  %s%s %s%s\n' \
+      "${OCR_DIM}" "${result_steps[i]}" "${OCR_RESET}" \
+      "${status_color}" "${status_icon}" "${result_statuses[i]}" "${OCR_RESET}"
   done
-  printf '  ────────────────────────────────────────────────────────\n'
-  printf '    Completed: %d/%d\n' "${done_count}" "${step_count}"
-  printf '    Elapsed:   %dh %dm %ds\n' \
-    "$((elapsed_s / 3600))" "$(( (elapsed_s % 3600) / 60 ))" "$((elapsed_s % 60))"
-  printf '══════════════════════════════════════════════════════════\n\n'
+  printf '%s  ──────────────────────────────────────────────────────%s\n' "${OCR_DIM}" "${OCR_RESET}"
+  printf '  %sCompleted:%s %s%d/%d%s\n' \
+    "${OCR_DIM}" "${OCR_RESET}" "${OCR_BOLD}" "${done_count}" "${step_count}" "${OCR_RESET}"
+  printf '  %sElapsed:  %s %s%dh %dm %ds%s\n' \
+    "${OCR_DIM}" "${OCR_RESET}" "${OCR_DIM}" \
+    "$((elapsed_s / 3600))" "$(( (elapsed_s % 3600) / 60 ))" "$((elapsed_s % 60))" "${OCR_RESET}"
+  printf '%s╚══════════════════════════════════════════════════════════╝%s\n\n' "${OCR_CYAN}" "${OCR_RESET}"
 
   [[ "${failed}" == true ]] && return 1
   return 0
@@ -234,8 +311,9 @@ ocr_execute_stage() {
     verify_rc=$?
     set -e
     if ((verify_rc != 0)); then
-      printf 'Refusing %s mutation: predecessor stage %s is incomplete. %s\n' \
-        "${STAGE_NAME}" "${predecessor}" "$(ocr_redact "${verify_output}" | tail -1)" >&2
+      printf '%sRefusing %s mutation: predecessor stage %s is incomplete.%s %s\n' \
+        "${OCR_RED}" "${STAGE_NAME}" "${predecessor}" "${OCR_RESET}" \
+        "$(ocr_redact "${verify_output}" | tail -1)" >&2
       return 2
     fi
   done
@@ -255,24 +333,28 @@ ocr_execute_stage() {
     set -e
     if [[ ${verify_rc} -eq 0 ]]; then
       if [[ -n "${OCR_FORCE:-}" && -n "${requested_step}" ]]; then
-        printf '%s stage already complete; --force re-executing step %s.\n' "${STAGE_NAME}" "${requested_step}"
+        printf '%s stage already complete; %s--force%s re-executing step %s.\n' \
+          "${STAGE_NAME}" "${OCR_YELLOW}" "${OCR_RESET}" "${requested_step}"
       else
-        printf '%s stage is already complete; nothing to execute.\n' "${STAGE_NAME}"
+        printf '%s✔ %s stage is already complete; nothing to execute.%s\n' \
+          "${OCR_GREEN}" "${STAGE_NAME}" "${OCR_RESET}"
         return 0
       fi
     else
       local blocking_step
       blocking_step=$(ocr_state_blocking_step "${STAGE_NAME}") || {
-        printf 'Unable to determine the blocking step; run verify first.\n' >&2
+        printf '%sUnable to determine the blocking step; run verify first.%s\n' "${OCR_RED}" "${OCR_RESET}" >&2
         return 2
       }
       if [[ -z "${requested_step}" ]]; then
         requested_step=${blocking_step}
       elif [[ "${requested_step}" != "${blocking_step}" ]]; then
         if [[ -n "${OCR_FORCE:-}" ]]; then
-          printf 'Overriding blocker step %s; --force re-executing step %s.\n' "${blocking_step}" "${requested_step}"
+          printf 'Overriding blocker step %s; %s--force%s re-executing step %s.\n' \
+            "${blocking_step}" "${OCR_YELLOW}" "${OCR_RESET}" "${requested_step}"
         else
-          printf 'Refusing step %s: the freshly verified blocker is step %s.\n' "${requested_step}" "${blocking_step}" >&2
+          printf '%sRefusing step %s: the freshly verified blocker is step %s.%s\n' \
+            "${OCR_RED}" "${requested_step}" "${blocking_step}" "${OCR_RESET}" >&2
           return 2
         fi
       fi
@@ -298,9 +380,15 @@ ocr_execute_stage() {
       local expected="execute ${VERSION} ${STAGE_NAME} ${requested_step}"
       local answer=''
       if [[ -z "${OCR_VERIFY_STEP:-}" && -z "${_ocr_skip_arg}" ]]; then
-        printf 'Explicit approval required. Type exactly: %s OR Type "s" to skip this step and proceed, OR press Enter to stop:\n> ' "${expected}" >&2
+        printf '%sApproval required.%s Type exactly: %s%s%s\n  OR type %s"s"%s to skip, or Enter to stop:\n%s>%s ' \
+          "${OCR_YELLOW}${OCR_BOLD}" "${OCR_RESET}" \
+          "${OCR_WHITE}" "${expected}" "${OCR_RESET}" \
+          "${OCR_CYAN}" "${OCR_RESET}" "${OCR_BOLD}" "${OCR_RESET}" >&2
       else
-        printf 'Explicit approval required. Type exactly: %s\n> ' "${expected}" >&2
+        printf '%sApproval required.%s Type exactly: %s%s%s\n%s>%s ' \
+          "${OCR_YELLOW}${OCR_BOLD}" "${OCR_RESET}" \
+          "${OCR_WHITE}" "${expected}" "${OCR_RESET}" \
+          "${OCR_BOLD}" "${OCR_RESET}" >&2
       fi
       IFS= read -r answer </dev/tty 2>/dev/null || true
       if [[ "${answer}" == "${expected}" ]]; then
@@ -310,13 +398,14 @@ ocr_execute_stage() {
         _ocr_skip_arg=''
         continue
       else
-        printf 'Execution approval not granted; no mutation was run.\n' >&2
+        printf '%sExecution approval not granted; no mutation was run.%s\n' "${OCR_RED}" "${OCR_RESET}" >&2
         return 3
       fi
     fi
     if [[ "${guard_rerun}" == true && -f "${mutation_marker}" ]]; then
-      printf 'Step %s was already executed for this release at %s. Re-verification still blocks; wait for propagation instead of repeating the mutation. Remove %s only after confirming an explicit retry is required.\n' \
-        "${requested_step}" "$(<"${mutation_marker}")" "${mutation_marker}" >&2
+      printf '%sStep %s was already executed for this release at %s.%s Re-verification still blocks; wait for propagation instead of repeating the mutation.\nRemove %s only after confirming an explicit retry is required.\n' \
+        "${OCR_YELLOW}${OCR_BOLD}" "${requested_step}" "$(<"${mutation_marker}")" "${OCR_RESET}" \
+        "${mutation_marker}" >&2
       return 2
     fi
     ocr_execute_step "${requested_step}"
@@ -329,7 +418,7 @@ ocr_execute_stage() {
     post_verify_rc=$?
     set -e
     if [[ ${post_verify_rc} -eq 2 && -z "${_ocr_skip_arg}" ]]; then
-      printf 'Type "s" to skip this step and proceed, or press Enter to stop: ' >&2
+      printf '%sType "s" to skip this step and proceed, or press Enter to stop:%s ' "${OCR_DIM}" "${OCR_RESET}" >&2
       IFS= read -r skip_input </dev/tty 2>/dev/null || true
       if [[ "${skip_input}" == [sS] ]]; then
         local _post_blocker
