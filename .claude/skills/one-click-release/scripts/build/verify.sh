@@ -270,6 +270,7 @@ verify_2_11() {
 verify_2_12() {
   ocr_require_konflux || return $?
   local apps operator_head bundle snapshot rev stale='' checked=0 app bundle_status idx_status
+  local image_mismatch=''
   : >"${REPORT_BASE}/.state/fbc-snapshot-comparison.tsv"
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
   operator_head=$(git ls-remote https://github.com/openshift-pipelines/operator.git "refs/heads/${RELEASE_BRANCH}" | awk '{print $1}')
@@ -284,6 +285,19 @@ verify_2_12() {
     bundle_status="CURRENT"
     # Pin the verified bundle snapshot so verify_2_13/execute_2_13 use the same one
     printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${bundle}-snapshot"
+
+    # Verify FBC bundle references the correct core image digest
+    local core_app core_snapshot core_image
+    core_app=$(find_app core)
+    if [[ -n "${core_app}" && -f "${REPORT_BASE}/.state/stage-${core_app}-snapshot" ]]; then
+      core_snapshot=$(<"${REPORT_BASE}/.state/stage-${core_app}-snapshot")
+      core_image=$(ocr_snapshot_component_image "${core_snapshot}" 2>/dev/null)
+      if [[ -n "${core_image}" ]]; then
+        if ! ocr_verify_fbc_references_core_image "${rev}" "${core_image}" "bundle"; then
+          image_mismatch+=" bundle"
+        fi
+      fi
+    fi
   else
     stale+=" bundle"
     bundle_status="GENERATED GAP/STALE"
@@ -300,6 +314,13 @@ verify_2_12() {
       idx_status="CURRENT"
       # Pin the verified index snapshot so verify_2_14/execute_2_14 use the same one
       printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${app}-snapshot"
+
+      # Verify index app also references the correct core image digest
+      if [[ -n "${core_app:-}" && -n "${core_image:-}" ]]; then
+        if ! ocr_verify_fbc_references_core_image "${rev}" "${core_image}" "${app}"; then
+          image_mismatch+=" ${app}"
+        fi
+      fi
     else
       stale+=" ${app}"
       idx_status="GENERATED GAP/STALE"
@@ -308,6 +329,9 @@ verify_2_12() {
       >>"${REPORT_BASE}/.state/fbc-snapshot-comparison.tsv"
   done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
   STEP_DETAILS="bundle snapshot present; ${checked} index snapshots checked"
+  if [[ -n "${image_mismatch}" ]]; then
+    STEP_DETAILS+="; ⚠ core image digest mismatch:${image_mismatch}"
+  fi
   if [[ -n "${stale}" ]]; then
     STEP_DETAILS+="; stale:${stale}"
     return "${OCR_RC_BLOCKED}"
