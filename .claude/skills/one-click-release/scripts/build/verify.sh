@@ -126,21 +126,25 @@ verify_rp_version_tag() {
   rps=$(ocr_oc_get releaseplans -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
 
   if [[ -n "${filter}" ]]; then
-    bad_names=$(jq -r --arg mm "${MM_DASHED}" --arg vtag "v${VERSION}" --arg f "${filter}" '
+    bad_names=$(jq -r --arg mm "${MM_DASHED}" --arg vtag "v${VERSION}" --arg ver "${VERSION}" --arg f "${filter}" '
       [.items[] | select(.metadata.name | contains($mm) and contains($f))
         | select(
             ([.spec.data.mapping.defaults.tags[]? | select(startswith($vtag))] | length) == 0
             and
             ([.spec.tenantPipeline.params[]? | select(.name == "release_version" and (.value | startswith($vtag)))] | length) == 0
+            and
+            ((.spec.data.mapping.defaults.contentGateway.productVersionName // "") | startswith($ver) | not)
           )]
       | .[].metadata.name' <<<"${rps}")
   else
-    bad_names=$(jq -r --arg mm "${MM_DASHED}" --arg vtag "v${VERSION}" '
+    bad_names=$(jq -r --arg mm "${MM_DASHED}" --arg vtag "v${VERSION}" --arg ver "${VERSION}" '
       [.items[] | select(.metadata.name | contains($mm))
         | select(
             ([.spec.data.mapping.defaults.tags[]? | select(startswith($vtag))] | length) == 0
             and
             ([.spec.tenantPipeline.params[]? | select(.name == "release_version" and (.value | startswith($vtag)))] | length) == 0
+            and
+            ((.spec.data.mapping.defaults.contentGateway.productVersionName // "") | startswith($ver) | not)
           )]
       | .[].metadata.name' <<<"${rps}")
   fi
