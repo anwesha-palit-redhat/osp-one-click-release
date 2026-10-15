@@ -3,6 +3,23 @@
 
 # Shared context, command, credential, and approval helpers.
 
+# ── Terminal colors (disabled when stdout is not a tty) ───────────────────────
+if [[ -t 1 ]]; then
+  OCR_BOLD=$'\033[1m'
+  OCR_DIM=$'\033[2m'
+  OCR_RESET=$'\033[0m'
+  OCR_RED=$'\033[0;31m'
+  OCR_GREEN=$'\033[0;32m'
+  OCR_YELLOW=$'\033[0;33m'
+  OCR_BLUE=$'\033[0;34m'
+  OCR_CYAN=$'\033[0;36m'
+  OCR_WHITE=$'\033[1;37m'
+else
+  OCR_BOLD='' OCR_DIM='' OCR_RESET=''
+  OCR_RED='' OCR_GREEN='' OCR_YELLOW=''
+  OCR_BLUE='' OCR_CYAN='' OCR_WHITE=''
+fi
+
 OCR_RC_BLOCKED=10
 OCR_RC_SKIPPED=20
 OCR_KONFLUX_NS="tekton-ecosystem-tenant"
@@ -278,10 +295,11 @@ ocr_confirm_action() {
   local stage=$1 step=$2
   local expected="execute ${VERSION} ${stage} ${step}"
   local answer=''
-  printf 'Explicit approval required. Type exactly: %s\n> ' "${expected}" >&2
+  printf '%sApproval required.%s Type exactly: %s%s%s\n> ' \
+    "${OCR_YELLOW}${OCR_BOLD}" "${OCR_RESET}" "${OCR_WHITE}" "${expected}" "${OCR_RESET}" >&2
   IFS= read -r answer || true
   [[ "${answer}" == "${expected}" ]] || {
-    printf 'Execution approval not granted; no mutation was run.\n' >&2
+    printf '%sExecution approval not granted; no mutation was run.%s\n' "${OCR_RED}" "${OCR_RESET}" >&2
     return 1
   }
 }
@@ -291,10 +309,11 @@ ocr_confirm_production() {
   # OCR_RUN_THROUGH only suppresses step-level prompts, not this stage gate.
   local expected="start production-release ${VERSION}"
   local answer=''
-  printf 'Production release has a separate gate. Type exactly: %s\n> ' "${expected}" >&2
+  printf '%s%s⚠  Production release gate.%s Type exactly: %s%s%s\n> ' \
+    "${OCR_BOLD}" "${OCR_RED}" "${OCR_RESET}" "${OCR_WHITE}" "${expected}" "${OCR_RESET}" >&2
   IFS= read -r answer || true
   [[ "${answer}" == "${expected}" ]] || {
-    printf 'Production approval not granted; production-release did not start.\n' >&2
+    printf '%sProduction approval not granted; production-release did not start.%s\n' "${OCR_RED}" "${OCR_RESET}" >&2
     return 1
   }
 }

@@ -131,7 +131,8 @@ case "${command}" in
       for stage in config build image-copy; do
         run_verify "${version}" "${stage}"
       done
-      printf 'Non-production stages verified. production-release remains a separate explicit action.\n'
+      printf '%s✔ Non-production stages verified.%s production-release remains a separate explicit action.\n' \
+        "${OCR_GREEN}${OCR_BOLD}" "${OCR_RESET}"
     fi
     ;;
   execute)
