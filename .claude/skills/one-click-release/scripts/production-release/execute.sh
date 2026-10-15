@@ -10,7 +10,7 @@ source "${SCRIPTS_DIR}/lib/release.sh"
 source "${SCRIPTS_DIR}/lib/stage-runner.sh"
 
 STAGE_NAME='production-release'
-STAGE_STEPS=(4.1 4.2 4.3 4.4 4.5 4.6 4.7 4.8 4.9)
+STAGE_STEPS=(4.1 4.2 4.3 4.4 4.5 4.6 4.7 4.8 4.9 4.10)
 
 ocr_describe_action() {
   case "$1" in
@@ -23,6 +23,7 @@ ocr_describe_action() {
     4.7) printf 'Wait for devel renders, dispatch the production catalog render, validate and merge its exact generated PR, then verify or trigger production index snapshots.\n' ;;
     4.8) printf 'Create all index production Release CRs.\n' ;;
     4.9) printf 'Create the CDN production Release CR using the succeeded core production snapshot.\n' ;;
+    4.10) printf 'Wait for the bundle image to appear on registry.redhat.io after the CDN pipeline completes.\n' ;;
   esac
 }
 
@@ -112,7 +113,9 @@ create_prod_release() {
   fi
   path="${REPORT_BASE}/manifest/prod/release-${VERSION}-${kind}-prod.yaml"
   ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
-  ocr_create_release_manifest "${path}"
+  ocr_create_release_manifest "${path}" || return 2
+  # Pin snapshot only after successful release creation to avoid stale snapshots on retry
+  printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/prod-${app}-snapshot"
 }
 
 execute_4_1() {
@@ -269,13 +272,20 @@ execute_4_5() { push_operator_placeholder .konflux/olm-catalog/bundle/.placehold
 
 execute_4_6() {
   ocr_require_konflux || return 2
-  local core
+  local core bundle_snapshot bundle_app
   core=$(successful_snapshot core prod cdn)
   [[ -n "${core}" ]] || {
     printf 'Core production release has not succeeded.\n' >&2
     return 2
   }
-  create_prod_release bundle
+  bundle_app=$(find_app bundle)
+  # Use the pinned production bundle snapshot (from verify_4_5)
+  if [[ -f "${REPORT_BASE}/.state/prod-${bundle_app}-snapshot" ]]; then
+    bundle_snapshot=$(<"${REPORT_BASE}/.state/prod-${bundle_app}-snapshot")
+  else
+    bundle_snapshot=$(ocr_latest_snapshot "${bundle_app}")
+  fi
+  create_prod_release bundle "${bundle_snapshot}"
 }
 
 wait_in_progress() {
@@ -406,58 +416,79 @@ execute_4_7() {
   fi
 }
 
+create_index_prod_release() {
+  local app=$1 snapshot rp ocp path existing existing_name existing_status existing_reason
+  if [[ -f "${REPORT_BASE}/.state/prod-${app}-snapshot" ]]; then
+    snapshot=$(<"${REPORT_BASE}/.state/prod-${app}-snapshot")
+  else
+    snapshot=$(ocr_latest_snapshot "${app}")
+  fi
+  [[ -n "${snapshot}" ]] || { printf 'No snapshot for %s; skipping.\n' "${app}"; return 0; }
+  rp=$(find_prod_rp "${app}")
+  [[ -n "${rp}" ]] || {
+    printf 'No production release plan for %s.\n' "${app}" >&2
+    return 2
+  }
+  existing=$(existing_release_for_snapshot "${rp}" "${snapshot}")
+  if [[ -n "${existing}" ]]; then
+    existing_name=${existing%%|*}
+    existing_status=${existing#*|}
+    existing_status=${existing_status%%|*}
+    existing_reason=${existing##*|}
+    printf 'Release %s already exists for %s (Released=%s, Reason=%s).\n' "${existing_name}" "${app}" "${existing_status}" "${existing_reason}"
+    if [[ "${existing_status}" == True ]]; then return 0; fi
+    if [[ "${existing_status}" == False ]]; then
+      if [[ "${existing_reason}" == Failed ]]; then
+        printf 'The latest attempt for %s failed; creating a retry Release CR.\n' "${app}" >&2
+      else
+        printf 'Release %s for %s is still in progress (Reason=%s); skipping.\n' "${existing_name}" "${app}" "${existing_reason}"
+        return 0
+      fi
+    else
+      printf 'Existing release %s is in an unknown state; refusing a duplicate.\n' "${existing_name}" >&2
+      return 2
+    fi
+  fi
+  ocp=${app#openshift-pipelines-index-}
+  ocp=${ocp%-"${MM_DASHED}"}
+  ocp=${ocp/-/.}
+  path="${REPORT_BASE}/manifest/prod/release-${VERSION}-index-${ocp}-prod.yaml"
+  ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
+  ocr_create_release_manifest "${path}" || return 2
+  printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/prod-${app}-snapshot"
+}
+
 execute_4_8() {
   ocr_require_konflux || return 2
-  local bundle apps app snapshot rp ocp path made=0 existing existing_name existing_status existing_reason
+  local bundle apps app pids=() apps_list=()
   bundle=$(successful_snapshot bundle prod)
   [[ -n "${bundle}" ]] || {
     printf 'Bundle production release has not succeeded.\n' >&2
     return 2
   }
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
-  while IFS= read -r app; do
-    snapshot=$(ocr_latest_snapshot "${app}")
-    [[ -n "${snapshot}" ]] || continue
-    rp=$(find_prod_rp "${app}")
-    [[ -n "${rp}" ]] || {
-      printf 'No production release plan for %s.\n' "${app}" >&2
-      return 2
-    }
-    existing=$(existing_release_for_snapshot "${rp}" "${snapshot}")
-    if [[ -n "${existing}" ]]; then
-      existing_name=${existing%%|*}
-      existing_status=${existing#*|}
-      existing_status=${existing_status%%|*}
-      existing_reason=${existing##*|}
-      printf 'Release %s already exists for %s (Released=%s, Reason=%s).\n' "${existing_name}" "${app}" "${existing_status}" "${existing_reason}"
-      if [[ "${existing_status}" == True ]]; then
-        ((made += 1))
-        continue
-      fi
-      if [[ "${existing_status}" == False ]]; then
-        if [[ "${existing_reason}" == Failed ]]; then
-          printf 'The latest attempt for %s failed; creating a retry Release CR.\n' "${app}" >&2
-        else
-          printf 'Release %s for %s is still in progress (Reason=%s); skipping.\n' "${existing_name}" "${app}" "${existing_reason}"
-          continue
-        fi
-      else
-        printf 'Existing release %s is in an unknown state; refusing a duplicate.\n' "${existing_name}" >&2
-        return 2
-      fi
-    fi
-    ocp=${app#openshift-pipelines-index-}
-    ocp=${ocp%-"${MM_DASHED}"}
-    ocp=${ocp/-/.}
-    path="${REPORT_BASE}/manifest/prod/release-${VERSION}-index-${ocp}-prod.yaml"
-    ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
-    ocr_create_release_manifest "${path}"
-    ((made += 1))
-  done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
-  ((made > 0)) || {
-    printf 'No index applications with snapshots found.\n' >&2
+  local index_apps
+  mapfile -t index_apps < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
+  ((${#index_apps[@]} > 0)) || {
+    printf 'No index applications found.\n' >&2
     return 2
   }
+  for app in "${index_apps[@]}"; do
+    [[ -n "${app}" ]] || continue
+    apps_list+=("${app}")
+    create_index_prod_release "${app}" &
+    pids+=($!)
+  done
+  local i failed=0
+  for i in "${!pids[@]}"; do
+    if wait "${pids[$i]}"; then
+      printf 'Index production release done for %s.\n' "${apps_list[$i]}"
+    else
+      printf 'Index production release failed for %s.\n' "${apps_list[$i]}" >&2
+      failed=1
+    fi
+  done
+  ((failed == 0)) || return 2
 }
 
 execute_4_9() {
@@ -503,10 +534,17 @@ execute_4_9() {
   printf '\nAfter success, update the product version YAML via GitLab MR to set invisible: false.\n'
 }
 
+execute_4_10() {
+  printf 'Image publication to registry.redhat.io is handled by the CDN pipeline after step 4.9.\n'
+  printf 'Re-verify once the CDN release completes (typically 10–30 minutes after CDN release succeeds).\n'
+  return 2
+}
+
 ocr_execute_step() {
   case "$1" in
     4.1) execute_4_1 ;; 4.2) execute_4_2 ;; 4.3) execute_4_3 ;; 4.4) execute_4_4 ;;
-    4.5) execute_4_5 ;; 4.6) execute_4_6 ;; 4.7) execute_4_7 ;; 4.8) execute_4_8 ;; 4.9) execute_4_9 ;;
+    4.5) execute_4_5 ;; 4.6) execute_4_6 ;; 4.7) execute_4_7 ;; 4.8) execute_4_8 ;;
+    4.9) execute_4_9 ;; 4.10) execute_4_10 ;;
   esac
 }
 
