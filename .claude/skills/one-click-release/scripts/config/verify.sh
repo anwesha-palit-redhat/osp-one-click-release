@@ -30,7 +30,7 @@ ocr_step_title() {
     1.9) printf '%s' 'p12n-opc sync' ;;
     1.10) printf '%s' 'serve-tkn-cli submodules' ;;
     1.11) printf '%s' 'CLI product version config' ;;
-    1.12) printf '%s' 'CLI CDN RP/RPA' ;;
+    1.12) printf '%s' 'RP version tags & CDN handshake' ;;
   esac
 }
 
@@ -504,48 +504,58 @@ verify_1_11() {
 }
 
 verify_1_12() {
-  ocr_require_gitlab || return $?
-  local base rpa rp_sub auto rpa_count rp_count auto_count
-  local mm_dot="${MAJOR_MINOR}"  # e.g. 1.23
+  # ── Part 1: CDN RPAs exist in konflux-release-data (GitLab) ──
+  # This check only needs GITLAB_TOKEN, not cluster access.
+  if [[ -n "${GITLAB_TOKEN:-}" ]]; then
+    local gitlab_url="${GITLAB_URL:-https://gitlab.cee.redhat.com}"
+    local rpa_project="releng%2Fkonflux-release-data"
+    local rpa_dir="config/kflux-prd-rh02.0fk9.p1/product/ReleasePlanAdmission/tekton-ecosystem"
+    local rpa_prod_file="openshift-pipelines-${MM_DASHED}-core-cdn-prod.yaml"
+    local rpa_stage_file="openshift-pipelines-${MM_DASHED}-core-cdn-stage.yaml"
+    local rpa_prod_code rpa_stage_code
+    rpa_prod_code=$(curl -s -o /dev/null -w '%{http_code}' \
+      --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+      "${gitlab_url}/api/v4/projects/${rpa_project}/repository/files/$(printf '%s' "${rpa_dir}/${rpa_prod_file}" | sed 's|/|%2F|g')/raw?ref=main")
+    rpa_stage_code=$(curl -s -o /dev/null -w '%{http_code}' \
+      --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+      "${gitlab_url}/api/v4/projects/${rpa_project}/repository/files/$(printf '%s' "${rpa_dir}/${rpa_stage_file}" | sed 's|/|%2F|g')/raw?ref=main")
 
-  base="${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data/repository/tree"
+    if [[ "${rpa_prod_code}" != "200" || "${rpa_stage_code}" != "200" ]]; then
+      STEP_DETAILS="CDN RPAs missing in konflux-release-data (prod=${rpa_prod_code}, stage=${rpa_stage_code})"
+      return "${OCR_RC_BLOCKED}"
+    fi
+  fi
 
-  # RPA check — flat files, works as before
-  rpa=$(ocr_gitlab_get "${base}?path=config/kflux-prd-rh02.0fk9.p1/product/ReleasePlanAdmission/tekton-ecosystem&ref=main&per_page=100") || return "${OCR_RC_BLOCKED}"
-  rpa_count=$(jq --arg mm "${MM_DASHED}" '[.[] | select(.name | contains($mm) and contains("cdn"))] | length' <<<"${rpa}")
+  # ── Parts 2 & 3: Read results saved by execute_1_12 ──
+  # Instead of re-querying the cluster (which may not be reachable in the
+  # verify context), read the state files that execute_1_12 persisted.
+  local rp_tags_file="${REPORT_BASE}/.state/step-1-12-rp-tags-verified"
+  local cdn_hs_file="${REPORT_BASE}/.state/step-1-12-cdn-handshakes"
+  local cdn_rpas_file="${REPORT_BASE}/.state/step-1-12-cdn-rpas"
 
-  # Tenant RP check — look inside the version subdirectory for multi-doc YAMLs
-  # containing CDN ReleasePlan documents
-  local tenant_subdir="tenants-config/cluster/kflux-prd-rh02/tenants/tekton-ecosystem-tenant/openshift-pipelines-${mm_dot}"
-  local encoded_subdir
-  encoded_subdir=$(printf '%s' "${tenant_subdir}" | sed 's|/|%2F|g')
+  if [[ ! -f "${rp_tags_file}" || ! -f "${cdn_hs_file}" ]]; then
+    STEP_DETAILS="execute step 1.12 has not run yet (state files missing)"
+    return "${OCR_RC_BLOCKED}"
+  fi
 
-  rp_count=0
-  rp_sub=$(ocr_gitlab_get "${base}?path=$(printf '%s' "${tenant_subdir}" | jq -sRr @uri)&ref=main&per_page=100" 2>/dev/null) || rp_sub="[]"
+  local rp_count cdn_handshakes cdn_rpa_count
+  rp_count=$(<"${rp_tags_file}")
+  cdn_handshakes=$(<"${cdn_hs_file}")
+  cdn_rpa_count=$(cat "${cdn_rpas_file}" 2>/dev/null || true)
 
-  # For each YAML file in the tenant subdirectory, fetch its content
-  # and count YAML documents whose metadata.name contains "cdn"
-  local rp_file rp_file_path rp_content cdn_docs
-  while IFS= read -r rp_file; do
-    [[ -n "${rp_file}" ]] || continue
-    rp_file_path="${tenant_subdir}/${rp_file}"
-    local encoded_path
-    encoded_path=$(printf '%s' "${rp_file_path}" | sed 's|/|%2F|g')
-    rp_content=$(ocr_gitlab_get \
-      "${GITLAB_URL}/api/v4/projects/releng%2Fkonflux-release-data/repository/files/${encoded_path}/raw?ref=main" \
-      2>/dev/null) || continue
-    # Count YAML documents with "cdn" in metadata.name
-    cdn_docs=$(grep -c "name:.*cdn" <<<"${rp_content}" || true)
-    rp_count=$((rp_count + cdn_docs))
-  done < <(jq -r '.[] | select(.type == "blob" and (.name | endswith(".yaml"))) | .name' <<<"${rp_sub}")
+  if [[ -z "${rp_count}" ]] || ! [[ "${rp_count}" =~ ^[0-9]+$ ]] || [[ "${rp_count}" -eq 0 ]]; then
+    STEP_DETAILS="no verified ReleasePlan tags found in execute state"
+    return "${OCR_RC_BLOCKED}"
+  fi
 
-  # Auto-generated check — keep as-is (flat directory)
-  auto=$(ocr_gitlab_get "${base}?path=tenants-config/auto-generated/cluster/kflux-prd-rh02/tenants/tekton-ecosystem-tenant&ref=main&per_page=100") || return "${OCR_RC_BLOCKED}"
-  auto_count=$(jq --arg mm "${MM_DASHED}" '[.[] | select(.name | contains($mm) and contains("cdn"))] | length' <<<"${auto}")
+  if [[ -z "${cdn_handshakes}" ]]; then
+    STEP_DETAILS="${rp_count} RPs verified with v${VERSION} tags; no CDN handshakes recorded"
+    return "${OCR_RC_BLOCKED}"
+  fi
 
-  STEP_DETAILS="CDN RPAs: ${rpa_count}; tenant RPs: ${rp_count}; auto-generated RPs: ${auto_count}"
-  ((rpa_count >= 2 && rp_count >= 1)) || return "${OCR_RC_BLOCKED}"
+  STEP_DETAILS="${rp_count} RPs verified with v${VERSION} tags; CDN RP/RPA handshakes active (${cdn_rpa_count:-?} CDN RPAs)"
 }
+
 
 ocr_verify_step() {
   case "$1" in

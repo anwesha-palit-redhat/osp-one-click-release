@@ -12,7 +12,7 @@ source "${SCRIPTS_DIR}/lib/stage-runner.sh"
 STAGE_NAME=build
 STAGE_REPORT_TITLE='Build Stage Report'
 STAGE_REPORT_DIR=build
-STAGE_STEPS=(2.1 2.2 2.3 2.4 2.5 2.6 2.7 2.8 2.9 2.10 2.11 2.12 2.13 2.14)
+STAGE_STEPS=(2.1 2.2 2.3 2.4 2.5 2.6 2.7 2.8 2.9 2.10 2.11 2.12 2.13)
 
 find_app() {
   local kind=$1
@@ -30,12 +30,11 @@ ocr_step_title() {
     2.6) printf '%s' 'Wait for core snapshot' ;;
     2.7) printf '%s' 'Process nudge PRs' ;;
     2.8) printf '%s' 'Gate: snapshot + digests' ;;
-    2.9) printf '%s' 'Apply Konflux resources' ;;
-    2.10) printf '%s' 'Core stage release' ;;
-    2.11) printf '%s' 'OLM catalog render' ;;
-    2.12) printf '%s' 'Wait for FBC build' ;;
-    2.13) printf '%s' 'Bundle stage release' ;;
-    2.14) printf '%s' 'Index stage releases' ;;
+    2.9) printf '%s' 'Core stage release' ;;
+    2.10) printf '%s' 'OLM catalog render' ;;
+    2.11) printf '%s' 'Wait for FBC build' ;;
+    2.12) printf '%s' 'Bundle stage release' ;;
+    2.13) printf '%s' 'Index stage releases' ;;
   esac
 }
 
@@ -94,11 +93,13 @@ for repo,revs in sorted(repos.items()): print(repo+"|"+",".join(sorted(revs)))
     fi
     printf '%s\t%s\t%s\t%s\n' "${repo}" "${revs}" "${head}" "$([[ "${revs}" != *,* && "${revs}" == "${head}" ]] && echo CURRENT || echo STALE)" >>"${REPORT_BASE}/.state/core-snapshot-comparison.tsv"
   done <<<"${rows}"
-  STEP_DETAILS="snapshot ${snapshot}; all non-operator repos current"
   if [[ -n "${stale}" ]]; then
     STEP_DETAILS="snapshot ${snapshot}; stale or split:${stale}"
     return "${OCR_RC_BLOCKED}"
   fi
+  STEP_DETAILS="snapshot ${snapshot}; all non-operator repos current"
+  # Pin the verified core snapshot so execute_2_10 uses the exact same one
+  printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${core}-snapshot"
 }
 
 verify_release_kind() {
@@ -136,7 +137,7 @@ verify_release_kind() {
 verify_rp_version_tag() {
   local filter=${1:-} rps bad_names
 
-  rps=$(ocr_oc_get releaseplans -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
+  rps=$(ocr_oc_get releaseplans.appstudio.redhat.com -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
 
   if [[ -n "${filter}" ]]; then
     bad_names=$(jq -r --arg mm "${MM_DASHED}" --arg vtag "v${VERSION}" --arg ver "${VERSION}" --arg f "${filter}" '
@@ -170,33 +171,6 @@ verify_rp_version_tag() {
 
 verify_2_9() {
   ocr_require_konflux || return $?
-  local rps count bad_count bad_names
-  rps=$(ocr_oc_get releaseplans -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
-  count=$(jq --arg mm "${MM_DASHED}" '[.items[] | select(.metadata.name | contains($mm))] | length' <<<"${rps}")
-  ((count > 0)) || {
-    STEP_DETAILS="no ReleasePlans found for ${MM_DASHED}"
-    return "${OCR_RC_BLOCKED}"
-  }
-  bad_names=$(jq -r --arg mm "${MM_DASHED}" --arg vtag "v${VERSION}" --arg ver "${VERSION}" '
-    [.items[] | select(.metadata.name | contains($mm))
-      | select(
-          ([.spec.data.mapping.defaults.tags[]? | select(startswith($vtag))] | length) == 0
-          and
-          ([.spec.tenantPipeline.params[]? | select(.name == "release_version" and (.value | startswith($vtag)))] | length) == 0
-          and
-          ((.spec.data.mapping.defaults.contentGateway.productVersionName // "") | startswith($ver) | not)
-        )]
-    | .[].metadata.name' <<<"${rps}")
-  if [[ -n "${bad_names}" ]]; then
-    bad_count=$(wc -l <<<"${bad_names}" | tr -d ' ')
-    STEP_DETAILS="${count} ReleasePlan(s); ${bad_count} missing v${VERSION} tag: ${bad_names//$'\n'/, }"
-    return "${OCR_RC_BLOCKED}"
-  fi
-  STEP_DETAILS="${count} ReleasePlan(s) verified with v${VERSION} tags"
-}
-
-verify_2_10() {
-  ocr_require_konflux || return $?
   verify_release_kind core stage cdn || return $?
   verify_rp_version_tag core
 }
@@ -217,7 +191,7 @@ verify_2_7() {
   fi
 }
 
-verify_2_11() {
+verify_2_10() {
   local csv runs run_url state catalogs diff registry_ok=true error
 
   # Find the most recent commit on the release branch that modified the OLM catalog
@@ -235,14 +209,14 @@ verify_2_11() {
       --head "actions/update/operator-update-images-${RELEASE_BRANCH}" --state merged --limit 1 \
       --json number,url,mergedAt)
   fi
-  runs=$(gh run list --repo openshift-pipelines/operator --workflow=render-olm-catalog.yaml --limit 10 \
+  runs=$(gh run list --repo openshift-pipelines/operator --workflow=render-olm-catalog.yaml --limit 25 \
     --json status,conclusion,createdAt,displayTitle,headBranch,url,event 2>"${REPORT_BASE}/.state/gh-error") || {
     error=$(<"${REPORT_BASE}/.state/gh-error")
     ocr_fail_with_error 'unable to query staging render runs' "${error}"
     return $?
   }
   local run_created run_status
-  run_url=$(jq -r --arg b "${RELEASE_BRANCH}" '[.[] | select(.event=="workflow_dispatch" and .status=="completed" and .conclusion=="success") | select((.displayTitle//"")|contains($b))][0].url // [.[] | select(.event=="workflow_dispatch" and .status=="completed" and .conclusion=="success")][0].url // empty' <<<"${runs}")
+  run_url=$(jq -r --arg b "${RELEASE_BRANCH}" '[.[] | select((.event=="workflow_dispatch" or .event=="push") and .status=="completed" and .conclusion=="success") | select(.headBranch==$b or ((.displayTitle//"")|contains($b)))][0].url // [.[] | select((.event=="workflow_dispatch" or .event=="push") and .status=="completed" and .conclusion=="success")][0].url // empty' <<<"${runs}")
   run_created=$(jq -r --arg url "${run_url}" '.[] | select(.url==$url) | .createdAt' <<<"${runs}" | head -1)
   run_status=$(jq -r --arg url "${run_url}" '.[] | select(.url==$url) | "\(.status)/\(.conclusion)"' <<<"${runs}" | head -1)
   state=$(jq -r '.[0].number // empty' <<<"${csv}")
@@ -254,7 +228,7 @@ verify_2_11() {
     }
     grep -E '^\+.*image:.*(devel|staging)' <<<"${diff}" | grep -vE 'quay\.io/redhat-user-workloads' >/dev/null && registry_ok=false
   fi
-  catalogs=$(gh api "repos/openshift-pipelines/operator/commits?sha=${RELEASE_BRANCH}&per_page=10" \
+  catalogs=$(gh api "repos/openshift-pipelines/operator/commits?sha=${RELEASE_BRANCH}&per_page=30" \
     --jq '[.[] | select(.commit.message | test("catalog|render|OCP catalog"; "i"))] | length' 2>"${REPORT_BASE}/.state/gh-error") || {
     error=$(<"${REPORT_BASE}/.state/gh-error")
     ocr_fail_with_error 'unable to verify catalog commits' "${error}"
@@ -265,9 +239,9 @@ verify_2_11() {
   STEP_LINKS="operator [#${state}]($(jq -r '.[0].url' <<<"${csv}")), [render-olm-catalog](${run_url})"
 }
 
-verify_2_12() {
+verify_2_11() {
   ocr_require_konflux || return $?
-  local apps operator_head bundle snapshot rev stale='' checked=0 app
+  local apps operator_head bundle snapshot rev stale='' checked=0 app bundle_status idx_status
   : >"${REPORT_BASE}/.state/fbc-snapshot-comparison.tsv"
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
   operator_head=$(git ls-remote https://github.com/openshift-pipelines/operator.git "refs/heads/${RELEASE_BRANCH}" | awk '{print $1}')
@@ -278,9 +252,10 @@ verify_2_12() {
     return "${OCR_RC_BLOCKED}"
   }
   rev=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.spec.components[0].source.git.revision}' 2>/dev/null)
-  local bundle_status
   if ocr_operator_revision_is_generated "${rev}" "${operator_head}"; then
     bundle_status="CURRENT"
+    # Pin the verified bundle snapshot so verify_2_12/execute_2_13 use the same one
+    printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${bundle}-snapshot"
   else
     stale+=" bundle"
     bundle_status="GENERATED GAP/STALE"
@@ -293,9 +268,10 @@ verify_2_12() {
     [[ -z "${snapshot}" ]] && continue
     ((checked += 1))
     rev=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.spec.components[0].source.git.revision}' 2>/dev/null)
-    local idx_status
     if ocr_operator_revision_is_generated "${rev}" "${operator_head}"; then
       idx_status="CURRENT"
+      # Pin the verified index snapshot so verify_2_13/execute_2_14 use the same one
+      printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${app}-snapshot"
     else
       stale+=" ${app}"
       idx_status="GENERATED GAP/STALE"
@@ -310,17 +286,35 @@ verify_2_12() {
   fi
 }
 
-verify_2_13() {
+verify_2_12() {
   ocr_require_konflux || return $?
+  # Prerequisite: core stage release must have succeeded
+  local releases
+  releases=$(release_status_json) || return "${OCR_RC_BLOCKED}"
+  if ! jq -e --arg mm "${MM_DASHED}" '
+    any(.items[]; (.spec.releasePlan | contains($mm) and contains("core") and contains("stage") and (contains("cdn")|not))
+      and any(.status.conditions[]?; .type=="Released" and .status=="True"))' <<<"${releases}" >/dev/null; then
+    STEP_DETAILS='core stage release has not succeeded; bundle cannot be released until core is complete'
+    return "${OCR_RC_BLOCKED}"
+  fi
   verify_release_kind bundle stage || return $?
   verify_rp_version_tag bundle
 }
 
-verify_2_14() {
+verify_2_13() {
   ocr_require_konflux || return $?
   local apps releases app snapshot total=0 succeeded=0 status
+  local state releases_file expected_file superseded count bad
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
   releases=$(release_status_json) || return "${OCR_RC_BLOCKED}"
+  # Prerequisite: bundle stage release must have succeeded
+  if ! jq -e --arg mm "${MM_DASHED}" '
+    any(.items[]; (.spec.releasePlan | contains($mm) and contains("bundle") and contains("stage"))
+      and any(.status.conditions[]?; .type=="Released" and .status=="True"))' <<<"${releases}" >/dev/null; then
+    STEP_DETAILS='bundle stage release has not succeeded; index cannot be released until bundle is complete'
+    return "${OCR_RC_BLOCKED}"
+  fi
+  expected_file=$(mktemp)
   while IFS= read -r app; do
     [[ -n "${app}" ]] || continue
     # Use pinned snapshot if it exists for this index app
@@ -331,6 +325,7 @@ verify_2_14() {
     fi
     [[ -z "${snapshot}" ]] && continue
     ((total += 1))
+    printf '%s\t%s\n' "${app}" "${snapshot}" >>"${expected_file}"
     status=$(jq -r --arg mm "${MM_DASHED}" --arg snap "${snapshot}" '
       if any(.items[]; .spec.snapshot==$snap and (.spec.releasePlan | contains($mm) and contains("stage")) and
         ((.spec.releasePlan | contains("fbc")) or (.spec.releasePlan | contains("index"))) and
@@ -341,8 +336,63 @@ verify_2_14() {
       printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${app}-snapshot"
     fi
   done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
-  STEP_DETAILS="${succeeded}/${total} index stage releases succeeded"
-  ((total > 0 && succeeded == total)) || return "${OCR_RC_BLOCKED}"
+  if ! ((total > 0 && succeeded == total)); then
+    STEP_DETAILS="${succeeded}/${total} index stage releases succeeded"
+    rm -f "${expected_file}"
+    return "${OCR_RC_BLOCKED}"
+  fi
+  # Extract IIB image digests and write state file for image-copy stage
+  state="${REPORT_BASE}/.state/image-copy-images.tsv"
+  releases_file=$(mktemp)
+  printf '%s\n' "${releases}" >"${releases_file}"
+  python3 - "${MM_DASHED}" "${VERSION}" "${releases_file}" "${expected_file}" >"${state}" <<'PY'
+import json, re, sys
+mm, version, path, expected_path = sys.argv[1:]
+data = json.load(open(path))
+
+def iib_images(item):
+    """Return {ocp_version: index_image_resolved} from a release CR."""
+    art = item.get('status', {}).get('artifacts', {}) or {}
+    out = {}
+    for c in art.get('components', []) or []:
+        img = c.get('index_image_resolved', '')
+        if img:
+            out[c.get('ocp_version', '').lstrip('v')] = img
+    for ver, d in (art.get('index_image', {}) or {}).items():
+        img = d.get('index_image_resolved', '')
+        if img:
+            out.setdefault(ver.lstrip('v'), img)
+    return out
+
+def released(item):
+    return next((c.get('status') for c in item.get('status', {}).get('conditions', [])
+                 if c.get('type') == 'Released'), 'Unknown')
+
+for line in open(expected_path):
+    app, snapshot = line.rstrip('\n').split('\t')
+    m = re.search(r'index-(\d+)-(\d+)-' + re.escape(mm), app)
+    ocp = f'{m.group(1)}.{m.group(2)}' if m else 'unknown'
+    candidates = []
+    for item in data.get('items', []):
+        rp = item.get('spec', {}).get('releasePlan', '')
+        if item.get('spec', {}).get('snapshot') != snapshot: continue
+        if 'stage' not in rp or not ('fbc' in rp or 'index' in rp): continue
+        candidates.append(item)
+    candidates.sort(key=lambda x: (x['metadata'].get('creationTimestamp', ''), x['metadata'].get('name', '')))
+    successful = [x for x in candidates if released(x) == 'True']
+    item = (successful[-1] if successful else candidates[-1] if candidates
+            else {'metadata': {'name': 'missing'}, 'spec': {'releasePlan': ''}, 'status': {}})
+    image = iib_images(item).get(ocp, '')
+    target = f'quay.io/openshift-pipeline/pipelines-index-{ocp}:v{version}-stage'
+    print('\t'.join([item['metadata']['name'], item['spec'].get('releasePlan', ''),
+                     released(item), image, ocp, target, snapshot]))
+PY
+  superseded=$(jq --arg mm "${MM_DASHED}" '[.items[] | select(.spec.releasePlan|contains($mm) and contains("stage")) | select(any(.status.conditions[]?; .type=="Released" and .status=="False"))] | length' <<<"${releases}")
+  rm -f "${releases_file}" "${expected_file}"
+  count=$(wc -l <"${state}" | tr -d ' ')
+  bad=$(awk -F'\t' '$3 != "True" || $4 !~ /^registry-proxy\.engineering\.redhat\.com\/rh-osbs\/iib@sha256:/ {n++} END {print n+0}' "${state}")
+  STEP_DETAILS="${succeeded}/${total} index stage releases succeeded; ${count} IIB images extracted; ${bad} without valid digest; ${superseded} superseded failures"
+  ((count > 0 && bad == 0)) || return "${OCR_RC_BLOCKED}"
   verify_rp_version_tag index
 }
 
@@ -369,8 +419,13 @@ verify_2_5() {
     return "${OCR_RC_BLOCKED}"
   }
 
-  # Get the latest core snapshot
-  snapshot=$(ocr_latest_snapshot "${core_app}")
+  # Use pinned core snapshot if verify_2_6 has already confirmed it as CURRENT;
+  # otherwise fall back to latest (pre-gate run or first time)
+  if [[ -f "${REPORT_BASE}/.state/stage-${core_app}-snapshot" ]]; then
+    snapshot=$(<"${REPORT_BASE}/.state/stage-${core_app}-snapshot")
+  else
+    snapshot=$(ocr_latest_snapshot "${core_app}")
+  fi
   [[ -n "${snapshot}" ]] || {
     printf 'No core snapshot found.\n' >&2
     return "${OCR_RC_BLOCKED}"
@@ -480,7 +535,7 @@ ocr_verify_step() {
     2.1) verify_2_1 ;; 2.2) verify_2_2 ;; 2.3) verify_2_3 ;; 2.4) verify_2_4 ;;
     2.5) verify_2_5 ;; 2.6) verify_2_6 ;; 2.7) verify_2_7 ;; 2.8) verify_2_8 ;;
     2.9) verify_2_9 ;; 2.10) verify_2_10 ;; 2.11) verify_2_11 ;; 2.12) verify_2_12 ;;
-    2.13) verify_2_13 ;; 2.14) verify_2_14 ;;
+    2.13) verify_2_13 ;;
   esac
 }
 
