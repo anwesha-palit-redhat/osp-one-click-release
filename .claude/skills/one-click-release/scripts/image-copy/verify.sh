@@ -39,7 +39,11 @@ verify_3_1() {
   expected_file=$(mktemp)
   printf '%s\n' "${releases}" >"${releases_file}"
   while IFS= read -r app; do
-    printf '%s\t%s\n' "${app}" "$(ocr_latest_snapshot "${app}")" >>"${expected_file}"
+    # Use the pinned index snapshot from build step 2.14 to avoid stray nudge snapshots
+    local snap=''
+    [[ -f "${REPORT_BASE}/.state/stage-${app}-snapshot" ]] && snap=$(<"${REPORT_BASE}/.state/stage-${app}-snapshot")
+    [[ -n "${snap}" ]] || snap=$(ocr_latest_snapshot "${app}")
+    printf '%s\t%s\n' "${app}" "${snap}" >>"${expected_file}"
   done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
     python3 - "${MM_DASHED}" "${VERSION}" "${releases_file}" "${expected_file}" >"${state}" <<'PY'
 import json, re, sys

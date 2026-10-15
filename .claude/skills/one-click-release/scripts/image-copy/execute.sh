@@ -105,20 +105,37 @@ execute_3_2() {
   printf '%s' "${QUAY_PASSWORD}" | skopeo login quay.io -u "${QUAY_USER}" --password-stdin
 
   local release rp status image ocp target snapshot src_digest dst_digest
-  # Copy only what is missing or mismatched.
+  local pids=() ocp_list=() image_list=() target_list=()
+
+  # Copy all images in parallel — each OCP version is independent
   while IFS=$'\t' read -r release rp status image ocp target snapshot; do
     src_digest=$(image_digest "${image}") || src_digest=''
     dst_digest=$(image_digest "${target}") || dst_digest=''
     if [[ -n "${src_digest}" && "${src_digest}" == "${dst_digest}" ]]; then
-      printf 'OCP %s: %s already present with matching digest; skipping.\n' "${ocp}" "${target}"
+      printf 'OCP %s: already present with matching digest; skipping.\n' "${ocp}"
       continue
     fi
     printf 'OCP %s: copying %s -> %s\n' "${ocp}" "${image}" "${target}"
-    skopeo copy --all "docker://${image}" "docker://${target}" --preserve-digests
+    skopeo copy --all "docker://${image}" "docker://${target}" --preserve-digests &
+    pids+=($!)
+    ocp_list+=("${ocp}")
+    image_list+=("${image}")
+    target_list+=("${target}")
   done <"${state}"
 
-  # Re-verify after copying.
-  local failed=0
+  # Wait for all parallel copies and collect failures
+  local failed=0 i
+  for i in "${!pids[@]}"; do
+    if wait "${pids[$i]}"; then
+      printf 'OCP %s: copy complete.\n' "${ocp_list[$i]}"
+    else
+      printf 'OCP %s: copy FAILED (%s -> %s)\n' "${ocp_list[$i]}" "${image_list[$i]}" "${target_list[$i]}" >&2
+      failed=1
+    fi
+  done
+
+  # Re-verify digests after all copies
+  local src_digest dst_digest
   while IFS=$'\t' read -r release rp status image ocp target snapshot; do
     src_digest=$(image_digest "${image}") || src_digest=''
     dst_digest=$(image_digest "${target}") || dst_digest=''
