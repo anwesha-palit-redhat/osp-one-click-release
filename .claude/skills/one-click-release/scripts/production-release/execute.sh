@@ -123,7 +123,19 @@ execute_4_1() {
 execute_4_2() {
   ocr_require_konflux || return 2
   local snapshot current app user_snapshot
-  if [[ -f "${REPORT_BASE}/.state/stage-core-snapshot" ]]; then snapshot=$(<"${REPORT_BASE}/.state/stage-core-snapshot"); else snapshot=''; fi
+  # Read pinned snapshot from stage-vars.env (written by build step 2.10)
+  snapshot=''
+  if [[ -f "${REPORT_BASE}/stage-vars.env" ]]; then
+    snapshot=$(grep -m1 '^STAGE_CORE_SNAPSHOT=' "${REPORT_BASE}/stage-vars.env" | cut -d= -f2-) || snapshot=''
+  fi
+  # Fall back to .state/stage-core-snapshot
+  if [[ -z "${snapshot}" && -f "${REPORT_BASE}/.state/stage-core-snapshot" ]]; then
+    snapshot=$(<"${REPORT_BASE}/.state/stage-core-snapshot")
+  fi
+  # Fall back to latest snapshot
+  if [[ -z "${snapshot}" ]]; then
+    snapshot=$(ocr_latest_snapshot "$(find_app core)")
+  fi
   [[ -n "${snapshot}" ]] || {
     printf 'No succeeded core stage snapshot found.\n' >&2
     return 2

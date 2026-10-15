@@ -184,7 +184,11 @@ create_stage_release() {
     printf '%s application not found.\n' "${kind}" >&2
     return 2
   }
-  snapshot=$(ocr_latest_snapshot "${app}")
+  # For core releases, use the pinned snapshot from .state/stage-core-snapshot
+  if [[ "${kind}" == core && -f "${REPORT_BASE}/.state/stage-core-snapshot" ]]; then
+    snapshot=$(<"${REPORT_BASE}/.state/stage-core-snapshot")
+  fi
+  [[ -n "${snapshot}" ]] || snapshot=$(ocr_latest_snapshot "${app}")
   [[ -n "${snapshot}" ]] || {
     printf 'No snapshot for %s.\n' "${app}" >&2
     return 2
@@ -251,7 +255,10 @@ execute_2_10() {
   # Record the core snapshot for the production release (step 4.2)
   local core_app
   core_app=$(find_app core)
-  STAGE_CORE_SNAPSHOT=$(ocr_latest_snapshot "${core_app}")
+  if [[ -f "${REPORT_BASE}/.state/stage-core-snapshot" ]]; then
+    STAGE_CORE_SNAPSHOT=$(<"${REPORT_BASE}/.state/stage-core-snapshot")
+  fi
+  [[ -n "${STAGE_CORE_SNAPSHOT:-}" ]] || STAGE_CORE_SNAPSHOT=$(ocr_latest_snapshot "${core_app}")
   export STAGE_CORE_SNAPSHOT
   printf 'STAGE_CORE_SNAPSHOT=%s\n' "${STAGE_CORE_SNAPSHOT}" >>"${REPORT_BASE}/stage-vars.env"
 }

@@ -87,7 +87,16 @@ verify_release() {
 verify_4_2() {
   ocr_require_konflux || return $?
   local stage_snapshot app latest user_snapshot
-  if [[ -f "${REPORT_BASE}/.state/stage-core-snapshot" ]]; then stage_snapshot=$(<"${REPORT_BASE}/.state/stage-core-snapshot"); else stage_snapshot=''; fi
+  # Read pinned snapshot from stage-vars.env (written by build step 2.10)
+  stage_snapshot=''
+  if [[ -f "${REPORT_BASE}/stage-vars.env" ]]; then
+    stage_snapshot=$(grep -m1 '^STAGE_CORE_SNAPSHOT=' "${REPORT_BASE}/stage-vars.env" | cut -d= -f2-) || stage_snapshot=''
+    [[ -z "${stage_snapshot}" ]] || printf 'Using STAGE_CORE_SNAPSHOT from stage-vars.env: %s\n' "${stage_snapshot}"
+  fi
+  # Fall back to .state/stage-core-snapshot
+  if [[ -z "${stage_snapshot}" && -f "${REPORT_BASE}/.state/stage-core-snapshot" ]]; then
+    stage_snapshot=$(<"${REPORT_BASE}/.state/stage-core-snapshot")
+  fi
   [[ -n "${stage_snapshot}" ]] || {
     STEP_DETAILS='succeeded core stage snapshot not found'
     return "${OCR_RC_BLOCKED}"
