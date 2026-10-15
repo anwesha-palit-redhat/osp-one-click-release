@@ -149,6 +149,18 @@ execute_4_2() {
     printf 'Pinned core snapshot no longer has a successful stage release.\n' >&2
     return 2
   }
+  # Snapshot consistency: cross-check with build-stage STAGE_CORE_SNAPSHOT
+  if [[ -f "${REPORT_BASE}/stage-vars.env" ]]; then
+    local _build_core_snapshot
+    _build_core_snapshot=$(grep '^STAGE_CORE_SNAPSHOT=' "${REPORT_BASE}/stage-vars.env" | tail -1 | cut -d= -f2-)
+    if [[ -n "${_build_core_snapshot}" && "${snapshot}" != "${_build_core_snapshot}" ]]; then
+      printf 'WARNING: stored stage-core-snapshot (%s) differs from build-stage STAGE_CORE_SNAPSHOT (%s)\n' \
+        "${snapshot}" "${_build_core_snapshot}" >&2
+    fi
+  else
+    printf 'WARNING: %s/stage-vars.env not found — cannot cross-check build-stage snapshot\n' \
+      "${REPORT_BASE}" >&2
+  fi
   create_prod_release core "${snapshot}"
 }
 

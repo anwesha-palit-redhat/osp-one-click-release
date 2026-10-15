@@ -50,6 +50,27 @@ ocr_create_release_manifest() {
   ocr_release_condition "${release_name}"
 }
 
+ocr_assert_snapshot_unchanged() {
+  local lock_file="${REPORT_BASE}/.state/locked-core-snapshot"
+  [[ -f "${lock_file}" ]] || return 0
+  local locked current core_app
+  locked=$(<"${lock_file}")
+  [[ -n "${locked}" ]] || return 0
+  core_app=$(ocr_oc_get applications.appstudio.redhat.com -o json 2>/dev/null | \
+    jq -r --arg mm "${MM_DASHED}" \
+    '.items[] | select(.metadata.name | contains("core") and contains($mm)) | .metadata.name' \
+    2>/dev/null | head -1) || return 0
+  [[ -n "${core_app}" ]] || return 0
+  current=$(ocr_latest_snapshot "${core_app}")
+  [[ -n "${current}" ]] || return 0
+  if [[ "${locked}" != "${current}" ]]; then
+    printf 'WARNING: core snapshot changed since step 2.6 — locked=%s current=%s\n' \
+      "${locked}" "${current}" >&2
+    return 1
+  fi
+  return 0
+}
+
 execute_code_unfreeze() {
   local temp branch pr open_url branch_rc
   temp=$(mktemp -d)

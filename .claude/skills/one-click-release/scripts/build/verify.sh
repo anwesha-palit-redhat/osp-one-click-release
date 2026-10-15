@@ -99,6 +99,8 @@ for repo,revs in sorted(repos.items()): print(repo+"|"+",".join(sorted(revs)))
     STEP_DETAILS="snapshot ${snapshot}; stale or split:${stale}"
     return "${OCR_RC_BLOCKED}"
   fi
+  # Lock the core snapshot for subsequent build steps
+  printf '%s\n' "${snapshot}" > "${REPORT_BASE}/.state/locked-core-snapshot"
 }
 
 verify_release_kind() {
@@ -152,6 +154,10 @@ verify_rp_version_tag() {
 }
 
 verify_2_9() {
+  ocr_assert_snapshot_unchanged || {
+    STEP_DETAILS="core snapshot changed — re-run from step 2.6"
+    return "${OCR_RC_BLOCKED}"
+  }
   ocr_require_konflux || return $?
   local rps count bad_count bad_names
   rps=$(ocr_oc_get releaseplans -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
@@ -177,12 +183,20 @@ verify_2_9() {
 }
 
 verify_2_10() {
+  ocr_assert_snapshot_unchanged || {
+    STEP_DETAILS="core snapshot changed — re-run from step 2.6"
+    return "${OCR_RC_BLOCKED}"
+  }
   ocr_require_konflux || return $?
   verify_release_kind core stage cdn || return $?
   verify_rp_version_tag core
 }
 
 verify_2_7() {
+  ocr_assert_snapshot_unchanged || {
+    STEP_DETAILS="core snapshot changed — re-run from step 2.6"
+    return "${OCR_RC_BLOCKED}"
+  }
   local prs count error
   prs=$(gh search prs --owner openshift-pipelines --base "${RELEASE_BRANCH}" --state open \
     --json repository,url,title,labels 'label:konflux-nudge' 2>"${REPORT_BASE}/.state/gh-error") || {
@@ -199,6 +213,10 @@ verify_2_7() {
 }
 
 verify_2_11() {
+  ocr_assert_snapshot_unchanged || {
+    STEP_DETAILS="core snapshot changed — re-run from step 2.6"
+    return "${OCR_RC_BLOCKED}"
+  }
   local csv runs run_url state catalogs diff registry_ok=true error
 
   # Find the most recent commit on the release branch that modified the OLM catalog
@@ -247,6 +265,10 @@ verify_2_11() {
 }
 
 verify_2_12() {
+  ocr_assert_snapshot_unchanged || {
+    STEP_DETAILS="core snapshot changed — re-run from step 2.6"
+    return "${OCR_RC_BLOCKED}"
+  }
   ocr_require_konflux || return $?
   local apps operator_head bundle snapshot rev stale='' checked=0 app
   : >"${REPORT_BASE}/.state/fbc-snapshot-comparison.tsv"
@@ -292,12 +314,20 @@ verify_2_12() {
 }
 
 verify_2_13() {
+  ocr_assert_snapshot_unchanged || {
+    STEP_DETAILS="core snapshot changed — re-run from step 2.6"
+    return "${OCR_RC_BLOCKED}"
+  }
   ocr_require_konflux || return $?
   verify_release_kind bundle stage || return $?
   verify_rp_version_tag bundle
 }
 
 verify_2_14() {
+  ocr_assert_snapshot_unchanged || {
+    STEP_DETAILS="core snapshot changed — re-run from step 2.6"
+    return "${OCR_RC_BLOCKED}"
+  }
   ocr_require_konflux || return $?
   local apps releases app snapshot total=0 succeeded=0 status
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
@@ -431,6 +461,10 @@ verify_2_2() {
 }
 
 verify_2_8() {
+  ocr_assert_snapshot_unchanged || {
+    STEP_DETAILS="core snapshot changed — re-run from step 2.6"
+    return "${OCR_RC_BLOCKED}"
+  }
   local snapshot_rc=0 digest_rc=0 failed=()
   verify_2_6 || snapshot_rc=$?
   verify_2_5 || digest_rc=$?

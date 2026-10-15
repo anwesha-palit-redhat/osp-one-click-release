@@ -109,6 +109,18 @@ verify_4_2() {
     STEP_DETAILS="verified core snapshot ${stage_snapshot} is no longer current (current ${latest:-missing})"
     return "${OCR_RC_BLOCKED}"
   }
+  # Snapshot consistency: cross-check with build-stage STAGE_CORE_SNAPSHOT
+  if [[ -f "${REPORT_BASE}/stage-vars.env" ]]; then
+    local _build_core_snapshot
+    _build_core_snapshot=$(grep '^STAGE_CORE_SNAPSHOT=' "${REPORT_BASE}/stage-vars.env" | tail -1 | cut -d= -f2-)
+    if [[ -n "${_build_core_snapshot}" && "${stage_snapshot}" != "${_build_core_snapshot}" ]]; then
+      printf 'WARNING: stage-core-snapshot (%s) differs from build-stage STAGE_CORE_SNAPSHOT (%s)\n' \
+        "${stage_snapshot}" "${_build_core_snapshot}" >&2
+    fi
+  else
+    printf 'WARNING: %s/stage-vars.env not found — cannot cross-check build-stage snapshot\n' \
+      "${REPORT_BASE}" >&2
+  fi
   verify_release core cdn "${stage_snapshot}"
 }
 
