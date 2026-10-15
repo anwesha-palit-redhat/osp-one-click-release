@@ -97,6 +97,15 @@ ocr_run_through_stage() {
     printf 'Cannot parse STAGE_STEPS from %s/verify.sh\n' "${stage_name}" >&2
     return 64
   fi
+
+  # Extract manual-only steps from the stage's execute script (if declared).
+  # These are skipped in run-through mode without attempting auto-execute.
+  local -a _manual_steps=()
+  local _manual_line
+  _manual_line=$(grep -m1 '^STAGE_RUN_THROUGH_MANUAL_STEPS=' "${scripts_dir}/${stage_name}/execute.sh" 2>/dev/null || true)
+  if [[ "${_manual_line}" =~ ^STAGE_RUN_THROUGH_MANUAL_STEPS=\( ]]; then
+    eval "_manual_steps=${_manual_line#*=}"
+  fi
   eval "${_steps_line}"
   local -a steps=("${STAGE_STEPS[@]}")
 
@@ -117,11 +126,12 @@ ocr_run_through_stage() {
     # Check if step should be skipped (respects --skip / OCR_SKIP_STEPS).
     skip_match=false
     if [[ -n "${OCR_SKIP_STEPS:-}" ]]; then
-      local IFS=','
+      local _ifs_save="${IFS}"
+      IFS=','
       for skip in ${OCR_SKIP_STEPS}; do
         [[ "${skip}" == "${step}" ]] && skip_match=true
       done
-      unset IFS
+      IFS="${_ifs_save}"
     fi
 
     if [[ "${skip_match}" == true ]]; then
@@ -144,13 +154,42 @@ ocr_run_through_stage() {
       continue
     fi
 
+    # OCR_RC_SKIPPED (20): step requires credentials or context not available — treat as SKIPPED,
+    # never attempt auto-execute or poll (it will never become DONE without external action).
+    if [[ ${verify_rc} -eq 20 ]]; then
+      printf '  [%s] SKIPPED (credential/context unavailable)\n' "${step}"
+      result_steps+=("${step}")
+      result_statuses+=("SKIPPED")
+      continue
+    fi
+
+    # Check if this step requires human action and must be skipped in run-through.
+    local _is_manual=false _m
+    for _m in "${_manual_steps[@]+"${_manual_steps[@]}"}"; do
+      [[ "${_m}" == "${step}" ]] && _is_manual=true && break
+    done
+    if [[ "${_is_manual}" == true ]]; then
+      printf '  [%s] SKIPPED (manual step — handle before running)\n' "${step}"
+      result_steps+=("${step}")
+      result_statuses+=("SKIPPED")
+      continue
+    fi
+
     # Step is blocked — auto-execute if execute.sh exists (no approval prompt).
     if [[ -x "${scripts_dir}/${stage_name}/execute.sh" ]]; then
       printf '  [%s] BLOCKED — auto-executing...\n' "${step}"
       exec_rc=0
       OCR_RUN_THROUGH=true OCR_SKIP_PROMPT=1 \
         "${scripts_dir}/${stage_name}/execute.sh" "${version}" "${step}" 2>&1 || exec_rc=$?
-      if [[ ${exec_rc} -ne 0 ]]; then
+      # Exit code 2 from execute means a non-retryable failure (e.g. code freeze still active).
+      # Stop immediately rather than polling forever.
+      if [[ ${exec_rc} -eq 2 ]]; then
+        printf '  [%s] execute reported a non-retryable failure — stopping run-through\n' "${step}" >&2
+        result_steps+=("${step}")
+        result_statuses+=("FAILED")
+        failed=true
+        break
+      elif [[ ${exec_rc} -ne 0 ]]; then
         printf '  [%s] execute exited %d — polling for completion\n' "${step}" "${exec_rc}"
       fi
     else
@@ -169,6 +208,12 @@ ocr_run_through_stage() {
         result_steps+=("${step}")
         result_statuses+=("DONE")
         done_count=$((done_count + 1))
+        break
+      fi
+      if [[ ${verify_rc} -eq 20 ]]; then
+        printf '  [%s] SKIPPED (credential/context unavailable after %d retries)\n' "${step}" "${retry}"
+        result_steps+=("${step}")
+        result_statuses+=("SKIPPED")
         break
       fi
 

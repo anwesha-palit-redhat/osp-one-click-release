@@ -11,6 +11,8 @@ source "${SCRIPTS_DIR}/lib/stage-runner.sh"
 
 STAGE_NAME=build
 STAGE_STEPS=(2.1 2.2 2.3 2.4 2.5 2.6 2.7 2.8 2.9 2.10 2.11 2.12 2.13 2.14)
+# Steps that require human judgment and must not be auto-executed in run-through mode.
+STAGE_RUN_THROUGH_MANUAL_STEPS=(2.1 2.2 2.3)
 
 ocr_describe_action() {
   case "$1" in
@@ -184,11 +186,12 @@ create_stage_release() {
     printf '%s application not found.\n' "${kind}" >&2
     return 2
   }
-  # For core releases, use the pinned snapshot from .state/stage-core-snapshot
-  if [[ "${kind}" == core && -f "${REPORT_BASE}/.state/stage-core-snapshot" ]]; then
-    snapshot=$(<"${REPORT_BASE}/.state/stage-core-snapshot")
+  # Use pinned snapshot if it exists (from a prior run), otherwise get latest
+  if [[ -f "${REPORT_BASE}/.state/stage-${app}-snapshot" ]]; then
+    snapshot=$(<"${REPORT_BASE}/.state/stage-${app}-snapshot")
+  else
+    snapshot=$(ocr_latest_snapshot "${app}")
   fi
-  [[ -n "${snapshot}" ]] || snapshot=$(ocr_latest_snapshot "${app}")
   [[ -n "${snapshot}" ]] || {
     printf 'No snapshot for %s.\n' "${app}" >&2
     return 2
@@ -220,7 +223,9 @@ create_stage_release() {
   fi
   path="${REPORT_BASE}/manifest/stage/release-${VERSION}-${kind}-stage.yaml"
   ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
-  ocr_create_release_manifest "${path}"
+  ocr_create_release_manifest "${path}" || return 2
+  # Pin snapshot only after successful release creation to avoid stale snapshots on retry
+  printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${app}-snapshot"
 }
 
 execute_2_9() {
@@ -475,58 +480,78 @@ execute_2_13() {
   create_stage_release bundle
 }
 
+create_index_stage_release() {
+  local app=$1 snapshot rp ocp path existing existing_name existing_status existing_reason
+  if [[ -f "${REPORT_BASE}/.state/stage-${app}-snapshot" ]]; then
+    snapshot=$(<"${REPORT_BASE}/.state/stage-${app}-snapshot")
+  else
+    snapshot=$(ocr_latest_snapshot "${app}")
+  fi
+  [[ -n "${snapshot}" ]] || { printf 'No snapshot for %s; skipping.\n' "${app}"; return 0; }
+  rp=$(find_release_plan "${app}" stage)
+  [[ -n "${rp}" ]] || {
+    printf 'No stage release plan for %s.\n' "${app}" >&2
+    return 2
+  }
+  existing=$(existing_release_for_snapshot "${rp}" "${snapshot}")
+  if [[ -n "${existing}" ]]; then
+    existing_name=${existing%%|*}
+    existing_status=${existing#*|}
+    existing_status=${existing_status%%|*}
+    existing_reason=${existing##*|}
+    printf 'Release %s already exists for %s (Released=%s, Reason=%s).\n' "${existing_name}" "${app}" "${existing_status}" "${existing_reason}"
+    if [[ "${existing_status}" == True ]]; then return 0; fi
+    if [[ "${existing_status}" == False ]]; then
+      if [[ "${existing_reason}" == Failed ]]; then
+        printf 'The latest attempt for %s failed; creating a retry Release CR.\n' "${app}" >&2
+      else
+        printf 'Release %s for %s is still in progress (Reason=%s); skipping.\n' "${existing_name}" "${app}" "${existing_reason}"
+        return 0
+      fi
+    else
+      printf 'Existing release %s is in an unknown state; refusing a duplicate.\n' "${existing_name}" >&2
+      return 2
+    fi
+  fi
+  ocp=${app#openshift-pipelines-index-}
+  ocp=${ocp%-"${MM_DASHED}"}
+  ocp=${ocp/-/.}
+  path="${REPORT_BASE}/manifest/stage/release-${VERSION}-index-${ocp}-stage.yaml"
+  ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
+  ocr_create_release_manifest "${path}" || return 2
+  printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${app}-snapshot"
+}
+
 execute_2_14() {
   ocr_require_konflux || return 2
   successful_release_exists bundle stage || {
     printf 'Bundle stage release has not succeeded.\n' >&2
     return 2
   }
-  local apps app snapshot rp ocp path made=0
+  local apps app pids=() apps_list=()
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
-  while IFS= read -r app; do
-    snapshot=$(ocr_latest_snapshot "${app}")
-    [[ -n "${snapshot}" ]] || continue
-    rp=$(find_release_plan "${app}" stage)
-    [[ -n "${rp}" ]] || {
-      printf 'No stage release plan for %s.\n' "${app}" >&2
-      return 2
-    }
-    local existing existing_name existing_status existing_reason
-    existing=$(existing_release_for_snapshot "${rp}" "${snapshot}")
-    if [[ -n "${existing}" ]]; then
-      existing_name=${existing%%|*}
-      existing_status=${existing#*|}
-      existing_status=${existing_status%%|*}
-      existing_reason=${existing##*|}
-      printf 'Release %s already exists for %s (Released=%s, Reason=%s).\n' "${existing_name}" "${app}" "${existing_status}" "${existing_reason}"
-      if [[ "${existing_status}" == True ]]; then
-        ((made += 1))
-        continue
-      fi
-      if [[ "${existing_status}" == False ]]; then
-        if [[ "${existing_reason}" == Failed ]]; then
-          printf 'The latest attempt for %s failed; creating a retry Release CR.\n' "${app}" >&2
-        else
-          printf 'Release %s for %s is still in progress (Reason=%s); skipping.\n' "${existing_name}" "${app}" "${existing_reason}"
-          continue
-        fi
-      else
-        printf 'Existing release %s is in an unknown state; refusing a duplicate.\n' "${existing_name}" >&2
-        return 2
-      fi
-    fi
-    ocp=${app#openshift-pipelines-index-}
-    ocp=${ocp%-"${MM_DASHED}"}
-    ocp=${ocp/-/.}
-    path="${REPORT_BASE}/manifest/stage/release-${VERSION}-index-${ocp}-stage.yaml"
-    ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
-    ocr_create_release_manifest "${path}"
-    ((made += 1))
-  done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
-  ((made > 0)) || {
-    printf 'No index applications with snapshots found.\n' >&2
+  local index_apps
+  mapfile -t index_apps < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
+  ((${#index_apps[@]} > 0)) || {
+    printf 'No index applications found.\n' >&2
     return 2
   }
+  for app in "${index_apps[@]}"; do
+    [[ -n "${app}" ]] || continue
+    apps_list+=("${app}")
+    create_index_stage_release "${app}" &
+    pids+=($!)
+  done
+  local i failed=0
+  for i in "${!pids[@]}"; do
+    if wait "${pids[$i]}"; then
+      printf 'Index stage release done for %s.\n' "${apps_list[$i]}"
+    else
+      printf 'Index release failed for %s.\n' "${apps_list[$i]}" >&2
+      failed=1
+    fi
+  done
+  ((failed == 0)) || return 2
 }
 
 execute_2_4() {

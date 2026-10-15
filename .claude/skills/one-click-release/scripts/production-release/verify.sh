@@ -12,7 +12,7 @@ source "${SCRIPTS_DIR}/lib/stage-runner.sh"
 STAGE_NAME='production-release'
 STAGE_REPORT_TITLE='Production Release Stage Report'
 STAGE_REPORT_DIR=release
-STAGE_STEPS=(4.1 4.2 4.3 4.4 4.5 4.6 4.7 4.8 4.9)
+STAGE_STEPS=(4.1 4.2 4.3 4.4 4.5 4.6 4.7 4.8 4.9 4.10)
 
 ocr_step_title() {
   case "$1" in
@@ -25,6 +25,7 @@ ocr_step_title() {
     4.7) printf '%s' 'OLM catalog render + index snapshots' ;;
     4.8) printf '%s' 'Index production releases' ;;
     4.9) printf '%s' 'CDN production release' ;;
+    4.10) printf '%s' 'Verify image published' ;;
   esac
 }
 
@@ -95,9 +96,13 @@ verify_4_2() {
     stage_snapshot=$(grep -m1 '^STAGE_CORE_SNAPSHOT=' "${REPORT_BASE}/stage-vars.env" | cut -d= -f2-) || stage_snapshot=''
     [[ -z "${stage_snapshot}" ]] || printf 'Using STAGE_CORE_SNAPSHOT from stage-vars.env: %s\n' "${stage_snapshot}"
   fi
-  # Fall back to .state/stage-core-snapshot
-  if [[ -z "${stage_snapshot}" && -f "${REPORT_BASE}/.state/stage-core-snapshot" ]]; then
-    stage_snapshot=$(<"${REPORT_BASE}/.state/stage-core-snapshot")
+  # Fall back to per-app state file
+  if [[ -z "${stage_snapshot}" ]]; then
+    local core_app
+    core_app=$(ocr_oc_get applications.appstudio.redhat.com -o json 2>/dev/null | jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("core") and contains($mm)) | .metadata.name' | head -1)
+    if [[ -n "${core_app}" && -f "${REPORT_BASE}/.state/stage-${core_app}-snapshot" ]]; then
+      stage_snapshot=$(<"${REPORT_BASE}/.state/stage-${core_app}-snapshot")
+    fi
   fi
   [[ -n "${stage_snapshot}" ]] || {
     STEP_DETAILS='succeeded core stage snapshot not found'
@@ -143,7 +148,9 @@ verify_4_3() {
     return "${OCR_RC_BLOCKED}"
   }
   run_url=$(jq -r '.url' <<<"${run}")
-  if [[ -f "${REPORT_BASE}/.state/stage-core-snapshot" ]]; then core_snapshot=$(<"${REPORT_BASE}/.state/stage-core-snapshot"); else core_snapshot=''; fi
+  local core_app
+  core_app=$(ocr_oc_get applications.appstudio.redhat.com -o json 2>/dev/null | jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("core") and contains($mm)) | .metadata.name' | head -1)
+  if [[ -n "${core_app}" && -f "${REPORT_BASE}/.state/stage-${core_app}-snapshot" ]]; then core_snapshot=$(<"${REPORT_BASE}/.state/stage-${core_app}-snapshot"); else core_snapshot=''; fi
   releases=$(releases_json) || return "${OCR_RC_BLOCKED}"
   core_release_created=$(jq -r --arg snap "${core_snapshot}" '[.items[] | select(.spec.snapshot==$snap and (.spec.releasePlan|contains("core") and contains("prod") and (contains("cdn")|not)))
     | select(any(.status.conditions[]?; .type=="Released" and .status=="True")) | .metadata.creationTimestamp] | sort | last // empty' <<<"${releases}")
@@ -204,12 +211,8 @@ verify_4_5() {
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
   bundle_app=$(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("bundle") and contains($mm)) | .metadata.name' <<<"${apps}" | head -1)
 
-  # Use the pinned bundle snapshot if it exists
-  if [[ -f "${REPORT_BASE}/.state/stage-${bundle_app}-snapshot" ]]; then
-    snapshot=$(<"${REPORT_BASE}/.state/stage-${bundle_app}-snapshot")
-  else
-    snapshot=$(ocr_latest_snapshot "${bundle_app}")
-  fi
+  # Bundle is rebuilt for production — always use latest to find the post-rebuild snapshot
+  snapshot=$(ocr_latest_snapshot "${bundle_app}")
   [[ -n "${snapshot}" ]] || {
     STEP_DETAILS='bundle snapshot not found'
     return "${OCR_RC_BLOCKED}"
@@ -230,6 +233,8 @@ verify_4_5() {
     return "${OCR_RC_BLOCKED}"
   }
   ocr_operator_revision_is_generated "${rev}" "${head}" || return "${OCR_RC_BLOCKED}"
+  # Pin the production bundle snapshot for use by execute_4_6
+  printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/prod-${bundle_app}-snapshot"
 }
 
 verify_4_6() {
@@ -238,9 +243,9 @@ verify_4_6() {
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
   bundle_app=$(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("bundle") and contains($mm)) | .metadata.name' <<<"${apps}" | head -1)
 
-  # Use the pinned bundle snapshot if it exists
-  if [[ -f "${REPORT_BASE}/.state/stage-${bundle_app}-snapshot" ]]; then
-    snapshot=$(<"${REPORT_BASE}/.state/stage-${bundle_app}-snapshot")
+  # Use the production-pinned bundle snapshot (saved by verify_4_5)
+  if [[ -f "${REPORT_BASE}/.state/prod-${bundle_app}-snapshot" ]]; then
+    snapshot=$(<"${REPORT_BASE}/.state/prod-${bundle_app}-snapshot")
   else
     snapshot=$(ocr_latest_snapshot "${bundle_app}")
   fi
@@ -327,12 +332,8 @@ verify_4_7() {
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
   : >"${REPORT_BASE}/.state/production-index-snapshots.tsv"
   while IFS= read -r app; do
-    # Each index app uses its own pinned snapshot
-    if [[ -f "${REPORT_BASE}/.state/stage-${app}-snapshot" ]]; then
-      snapshot=$(<"${REPORT_BASE}/.state/stage-${app}-snapshot")
-    else
-      snapshot=$(ocr_latest_snapshot "${app}")
-    fi
+    # Index is rebuilt for production — always use latest to find the post-rebuild snapshot
+    snapshot=$(ocr_latest_snapshot "${app}")
     [[ -n "${snapshot}" ]] || continue
     ((checked += 1))
     rev=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.spec.components[0].source.git.revision}')
@@ -342,7 +343,13 @@ verify_4_7() {
     if ocr_operator_release_stage_at "${rev}"; then release_stage=production; else release_stage=unknown; fi
     [[ "${snapshot_created}" > "${merged_at}" ]] || ((old += 1))
     [[ ("${ancestry}" == ahead || "${ancestry}" == identical) && "${release_stage}" == production ]] || ((stale += 1))
-    printf '%s\t%s\t%s\t%s\t%s\n' "${app}" "${snapshot}" "${rev}" "${snapshot_created}" "$([[ ("${ancestry}" == ahead || "${ancestry}" == identical) && "${release_stage}" == production && "${snapshot_created}" > "${merged_at}" ]] && echo CURRENT || echo STALE)" >>"${REPORT_BASE}/.state/production-index-snapshots.tsv"
+    local snapshot_status="STALE"
+    if [[ ("${ancestry}" == ahead || "${ancestry}" == identical) && "${release_stage}" == production && "${snapshot_created}" > "${merged_at}" ]]; then
+      snapshot_status="CURRENT"
+      # Pin the production index snapshot for use by execute_4_8
+      printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/prod-${app}-snapshot"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "${app}" "${snapshot}" "${rev}" "${snapshot_created}" "${snapshot_status}" >>"${REPORT_BASE}/.state/production-index-snapshots.tsv"
   done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
   STEP_DETAILS="production render run ${RUN_ID} succeeded; ${checked} index snapshots checked; ${stale} stale; ${old} pre-render"
   STEP_LINKS="[render-olm-catalog](${run_url}), operator [#${number}](${pr_url})"
@@ -355,9 +362,9 @@ verify_4_8() {
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
   releases=$(releases_json)
   while IFS= read -r app; do
-    # Each index app uses its own pinned snapshot
-    if [[ -f "${REPORT_BASE}/.state/stage-${app}-snapshot" ]]; then
-      snapshot=$(<"${REPORT_BASE}/.state/stage-${app}-snapshot")
+    # Use the production-pinned index snapshot (saved by verify_4_7)
+    if [[ -f "${REPORT_BASE}/.state/prod-${app}-snapshot" ]]; then
+      snapshot=$(<"${REPORT_BASE}/.state/prod-${app}-snapshot")
     else
       snapshot=$(ocr_latest_snapshot "${app}")
     fi
@@ -384,10 +391,43 @@ verify_4_9() {
   verify_release cdn '' "${snapshot}"
 }
 
+verify_4_10() {
+  local image="registry.redhat.io/openshift-pipelines/pipelines-operator-bundle:v${VERSION}"
+  local state_file="${REPORT_BASE}/.state/published-bundle-image.tsv"
+  local inspect digest digest_short created
+
+  if command -v skopeo >/dev/null 2>&1; then
+    inspect=$(skopeo inspect --no-creds "docker://${image}" 2>/dev/null) || {
+      STEP_DETAILS="image not yet available at ${image}"
+      return "${OCR_RC_BLOCKED}"
+    }
+    digest=$(jq -r '.Digest // empty' <<<"${inspect}")
+    created=$(jq -r '.Created // empty' <<<"${inspect}")
+    digest_short=${digest:0:19}
+    STEP_DETAILS="available; digest ${digest_short}; published $(ocr_abs_time "${created}")"
+    printf '%s\t%s\t%s\n' "${image}" "${digest}" "${created}" >"${state_file}"
+    STEP_LINKS="[${image}](https://catalog.redhat.com/software/containers/search?q=openshift-pipelines)"
+  elif command -v docker >/dev/null 2>&1; then
+    docker pull "${image}" >/dev/null 2>&1 || {
+      STEP_DETAILS="image not yet available at ${image}"
+      return "${OCR_RC_BLOCKED}"
+    }
+    digest=$(docker inspect --format='{{index .RepoDigests 0}}' "${image}" 2>/dev/null | cut -d@ -f2)
+    digest_short=${digest:0:19}
+    STEP_DETAILS="available; digest ${digest_short}"
+    printf '%s\t%s\t\n' "${image}" "${digest}" >"${state_file}"
+    STEP_LINKS="[${image}](https://catalog.redhat.com/software/containers/search?q=openshift-pipelines)"
+  else
+    STEP_DETAILS="skopeo and docker unavailable; cannot verify published image"
+    return "${OCR_RC_SKIPPED}"
+  fi
+}
+
 ocr_verify_step() {
   case "$1" in
     4.1) verify_4_1 ;; 4.2) verify_4_2 ;; 4.3) verify_4_3 ;; 4.4) verify_4_4 ;;
-    4.5) verify_4_5 ;; 4.6) verify_4_6 ;; 4.7) verify_4_7 ;; 4.8) verify_4_8 ;; 4.9) verify_4_9 ;;
+    4.5) verify_4_5 ;; 4.6) verify_4_6 ;; 4.7) verify_4_7 ;; 4.8) verify_4_8 ;;
+    4.9) verify_4_9 ;; 4.10) verify_4_10 ;;
   esac
 }
 
@@ -402,6 +442,13 @@ ocr_report_stage_details() {
   if [[ -s "${file}" ]]; then
     printf '\n## Production Index Snapshots\n\n| Application | Snapshot | Revision | Created | Status |\n|-------------|----------|----------|---------|--------|\n'
     while IFS=$'\t' read -r app snapshot revision created status; do printf '| %s | %s | %s | %s | %s |\n' "${app}" "${snapshot}" "${revision}" "$(ocr_abs_time "${created}")" "${status}"; done <"${file}"
+  fi
+  file="${REPORT_BASE}/.state/published-bundle-image.tsv"
+  if [[ -s "${file}" ]]; then
+    printf '\n## Published Bundle Image\n\n| Image | Digest | Published |\n|-------|--------|----------|\n'
+    while IFS=$'\t' read -r image digest created; do
+      printf '| %s | %s | %s |\n' "${image}" "${digest}" "$([[ -n "${created}" ]] && ocr_abs_time "${created}" || printf '—')"
+    done <"${file}"
   fi
 }
 

@@ -43,11 +43,17 @@ ocr_write_release_manifest() {
 
 ocr_create_release_manifest() {
   local path=$1
-  local release_name
+  local release_name condition
   release_name=$(ocr_oc_create -f "${path}" -o jsonpath='{.metadata.name}') || return
   printf 'Created release: %s\n' "${release_name}"
   ocr_oc_wait_release "${release_name}" >/dev/null
-  ocr_release_condition "${release_name}"
+  condition=$(ocr_release_condition "${release_name}")
+  printf '%s\n' "${condition}"
+  # Fail if the release explicitly failed so callers can avoid pinning a bad snapshot
+  if [[ "${condition}" == *"Released=False"* && "${condition}" == *"Reason=Failed"* ]]; then
+    printf 'Release %s failed.\n' "${release_name}" >&2
+    return 2
+  fi
 }
 
 execute_code_unfreeze() {

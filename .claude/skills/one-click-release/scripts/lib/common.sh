@@ -287,7 +287,8 @@ ocr_confirm_action() {
 }
 
 ocr_confirm_production() {
-  [[ "${OCR_RUN_THROUGH:-}" == true ]] && return 0
+  # Production gate is never bypassed — not even in run-through mode.
+  # OCR_RUN_THROUGH only suppresses step-level prompts, not this stage gate.
   local expected="start production-release ${VERSION}"
   local answer=''
   printf 'Production release has a separate gate. Type exactly: %s\n> ' "${expected}" >&2
