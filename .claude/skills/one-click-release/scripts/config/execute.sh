@@ -28,7 +28,7 @@ ocr_describe_action() {
     1.9) printf 'Synchronize p12n-opc upstream/ with the latest OPC content.\n' ;;
     1.10) printf 'Merge or create the serve-tkn-cli submodule update PR.\n' ;;
     1.11) printf 'Manual action: create the product version GitLab MR.\n' ;;
-    1.12) printf 'Manual action: create CDN RP/RPA GitLab resources.\n' ;;
+    1.12) printf 'Apply CDN RP files from hack repo and verify RP/RPA handshake.\n' ;;
   esac
 }
 
@@ -997,201 +997,100 @@ YAML
 }
 
 execute_1_12() {
-  [[ -n "${GITLAB_TOKEN:-}" ]] || {
-    printf 'GITLAB_TOKEN not set — skipping step 1.12.\n'
-    return 0
-  }
+  ocr_require_konflux || return 2
 
-  local gitlab_url="${GITLAB_URL:-https://gitlab.cee.redhat.com}"
-  local project="releng%2Fkonflux-release-data"
-  local mm_dashed="${MAJOR_MINOR//./-}"
-  local branch="osp/cdn-rp-rpa-${mm_dashed}"
-
-  local rpa_dir="config/kflux-prd-rh02.0fk9.p1/product/ReleasePlanAdmission/tekton-ecosystem"
-  local rp_dir="tenants-config/cluster/kflux-prd-rh02/tenants/tekton-ecosystem-tenant"
-
-  local rpa_prod="openshift-pipelines-${mm_dashed}-core-cdn-prod.yaml"
-  local rpa_stage="openshift-pipelines-${mm_dashed}-core-cdn-stage.yaml"
-
-  # Check for existing open MR
-  local mr_url
-  mr_url=$(curl -sf --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-    "${gitlab_url}/api/v4/projects/${project}/merge_requests?state=opened&per_page=50" \
-    2>/dev/null \
-    | jq -r --arg mm "${mm_dashed}" \
-      '[.[] | select(.title | test($mm)) | select(.title | test("cdn";"i"))] | .[0].web_url // empty' \
-    2>/dev/null || true)
-
-  if [[ -n "${mr_url}" ]]; then
-    printf 'CDN RP/RPA MR already open: %s\n' "${mr_url}"
-    return 0
-  fi
-
-  # Check if RPA files already exist
-  local rpa_prod_code rpa_stage_code
-  rpa_prod_code=$(curl -s -o /dev/null -w '%{http_code}' \
-    --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-    "${gitlab_url}/api/v4/projects/${project}/repository/files/$(printf '%s' "${rpa_dir}/${rpa_prod}" | sed 's|/|%2F|g')/raw?ref=main")
-  rpa_stage_code=$(curl -s -o /dev/null -w '%{http_code}' \
-    --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-    "${gitlab_url}/api/v4/projects/${project}/repository/files/$(printf '%s' "${rpa_dir}/${rpa_stage}" | sed 's|/|%2F|g')/raw?ref=main")
-
-  # Also check tenant RP files
-  local rp_prod_code rp_stage_code
-  rp_prod_code=$(curl -s -o /dev/null -w '%{http_code}' \
-    --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-    "${gitlab_url}/api/v4/projects/${project}/repository/files/$(printf '%s' "${rp_dir}/${rpa_prod}" | sed 's|/|%2F|g')/raw?ref=main")
-  rp_stage_code=$(curl -s -o /dev/null -w '%{http_code}' \
-    --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-    "${gitlab_url}/api/v4/projects/${project}/repository/files/$(printf '%s' "${rp_dir}/${rpa_stage}" | sed 's|/|%2F|g')/raw?ref=main")
-
-  if [[ "${rpa_prod_code}" == "200" && "${rpa_stage_code}" == "200" \
-     && "${rp_prod_code}" == "200" && "${rp_stage_code}" == "200" ]]; then
-    printf 'CDN RP/RPA files already exist for %s.\n' "${mm_dashed}"
-    return 0
-  fi
-
-  # Find previous minor version's CDN files to copy from
-  local major="${MAJOR_MINOR%%.*}"
-  local minor="${MAJOR_MINOR#*.}"
-  local prev_minor=$((minor - 1))
-  local prev_mm_dashed="${major}-${prev_minor}"
-
-  printf 'Looking for previous CDN config from version %s...\n' "${prev_mm_dashed}" >&2
-
-  # Collect files to create: read previous version, replace version references
-  local actions="[]"
-  local files_created=0
-
-  local src_name dst_name src_path dst_path content
-  for suffix in prod stage; do
-    src_name="openshift-pipelines-${prev_mm_dashed}-core-cdn-${suffix}.yaml"
-    dst_name="openshift-pipelines-${mm_dashed}-core-cdn-${suffix}.yaml"
-    src_path="${rpa_dir}/${src_name}"
-    dst_path="${rpa_dir}/${dst_name}"
-
-    # Skip if destination already exists
-    local dst_code
-    dst_code=$(curl -s -o /dev/null -w '%{http_code}' \
+  # ── Part 1: Verify CDN RPAs exist in konflux-release-data (GitLab) ──
+  # RPAs are managed through GitLab and should already be in place.
+  if [[ -n "${GITLAB_TOKEN:-}" ]]; then
+    local gitlab_url="${GITLAB_URL:-https://gitlab.cee.redhat.com}"
+    local rpa_project="releng%2Fkonflux-release-data"
+    local rpa_dir="config/kflux-prd-rh02.0fk9.p1/product/ReleasePlanAdmission/tekton-ecosystem"
+    local rpa_prod_file="openshift-pipelines-${MM_DASHED}-core-cdn-prod.yaml"
+    local rpa_stage_file="openshift-pipelines-${MM_DASHED}-core-cdn-stage.yaml"
+    local rpa_prod_code rpa_stage_code
+    rpa_prod_code=$(curl -s -o /dev/null -w '%{http_code}' \
       --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-      "${gitlab_url}/api/v4/projects/${project}/repository/files/$(printf '%s' "${dst_path}" | sed 's|/|%2F|g')/raw?ref=main")
-    if [[ "${dst_code}" == "200" ]]; then
-      printf 'Already exists: %s\n' "${dst_name}"
-      continue
-    fi
-
-    # Read source file
-    content=$(curl -sf --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-      "${gitlab_url}/api/v4/projects/${project}/repository/files/$(printf '%s' "${src_path}" | sed 's|/|%2F|g')/raw?ref=main" \
-      2>/dev/null) || {
-      printf 'Cannot read previous version file: %s\n' "${src_path}" >&2
-      printf 'Manual creation required.\n' >&2
-      manual_action "MANUAL: create CDN RP/RPA for openshift-pipelines-${mm_dashed}. Reference: previous version ${prev_mm_dashed}."
-      return
-    }
-
-    # Replace version references (e.g. 1-22 → 1-23, 1.22 → 1.23)
-    content=$(printf '%s' "${content}" | sed \
-      -e "s/${prev_mm_dashed}/${mm_dashed}/g" \
-      -e "s/${major}\\.${prev_minor}/${MAJOR_MINOR}/g")
-
-    actions=$(printf '%s' "${actions}" | jq \
-      --arg path "${dst_path}" \
-      --arg content "${content}" \
-      '. + [{action: "create", file_path: $path, content: $content}]')
-    files_created=$((files_created + 1))
-  done
-
-  # Also copy RP files from tenant config
-  for suffix in prod stage; do
-    src_name="openshift-pipelines-${prev_mm_dashed}-core-cdn-${suffix}.yaml"
-    dst_name="openshift-pipelines-${mm_dashed}-core-cdn-${suffix}.yaml"
-    src_path="${rp_dir}/${src_name}"
-    dst_path="${rp_dir}/${dst_name}"
-
-    local dst_code
-    dst_code=$(curl -s -o /dev/null -w '%{http_code}' \
+      "${gitlab_url}/api/v4/projects/${rpa_project}/repository/files/$(printf '%s' "${rpa_dir}/${rpa_prod_file}" | sed 's|/|%2F|g')/raw?ref=main")
+    rpa_stage_code=$(curl -s -o /dev/null -w '%{http_code}' \
       --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-      "${gitlab_url}/api/v4/projects/${project}/repository/files/$(printf '%s' "${dst_path}" | sed 's|/|%2F|g')/raw?ref=main")
-    if [[ "${dst_code}" == "200" ]]; then
-      printf 'Already exists: %s\n' "${dst_name}"
-      continue
+      "${gitlab_url}/api/v4/projects/${rpa_project}/repository/files/$(printf '%s' "${rpa_dir}/${rpa_stage_file}" | sed 's|/|%2F|g')/raw?ref=main")
+
+    if [[ "${rpa_prod_code}" != "200" || "${rpa_stage_code}" != "200" ]]; then
+      STEP_DETAILS="CDN RPAs missing in konflux-release-data; create them via a GitLab MR first"
+      return "${OCR_RC_BLOCKED}"
     fi
-
-    content=$(curl -sf --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-      "${gitlab_url}/api/v4/projects/${project}/repository/files/$(printf '%s' "${src_path}" | sed 's|/|%2F|g')/raw?ref=main" \
-      2>/dev/null) || {
-      # RP files in tenant config may not exist for previous version — skip
-      printf 'No previous RP file found: %s — skipping.\n' "${src_path}" >&2
-      continue
-    }
-
-    content=$(printf '%s' "${content}" | sed \
-      -e "s/${prev_mm_dashed}/${mm_dashed}/g" \
-      -e "s/${major}\\.${prev_minor}/${MAJOR_MINOR}/g")
-
-    actions=$(printf '%s' "${actions}" | jq \
-      --arg path "${dst_path}" \
-      --arg content "${content}" \
-      '. + [{action: "create", file_path: $path, content: $content}]')
-    files_created=$((files_created + 1))
-  done
-
-  if ((files_created == 0)); then
-    printf 'All CDN RP/RPA files already exist — nothing to do.\n'
-    return 0
+    printf 'CDN RPA files confirmed in konflux-release-data.\n'
   fi
 
-  # Create branch + all files in a single commit
-  local commit_payload
-  commit_payload=$(jq -n \
-    --arg branch "${branch}" \
-    --arg msg "[bot:openshift-pipelines] Add CDN RP/RPA for ${mm_dashed}" \
-    --argjson actions "${actions}" \
-    '{
-      branch: $branch,
-      start_branch: "main",
-      commit_message: $msg,
-      actions: $actions
-    }')
+  # ── Part 2: Check hack repo for CDN tenant RP files and apply them ──
+  local temp
+  temp=$(mktemp -d)
+  trap 'rm -rf "${temp}"' RETURN
 
-  local commit_resp
-  commit_resp=$(curl -sf --request POST \
-    --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-    --header "Content-Type: application/json" \
-    --data "${commit_payload}" \
-    "${gitlab_url}/api/v4/projects/${project}/repository/commits" 2>&1) || {
-    printf 'Failed to create CDN commit: %s\n' "${commit_resp}" >&2
-    return 2
-  }
+  git clone --depth 1 https://github.com/openshift-pipelines/hack.git "${temp}/hack"
 
-  # Create MR
-  local mr_payload
-  mr_payload=$(jq -n \
-    --arg src "${branch}" \
-    --arg title "[bot:openshift-pipelines] Add CDN RP/RPA for ${mm_dashed}" \
-    '{
-      source_branch: $src,
-      target_branch: "main",
-      title: $title,
-      remove_source_branch: true
-    }')
+  local hack_dir="${temp}/hack/.konflux/openshift-pipelines/${MM_DASHED}"
+  if [[ ! -d "${hack_dir}" ]]; then
+    rm -rf "${temp}"; trap - RETURN
+    STEP_DETAILS="Directory .konflux/openshift-pipelines/${MM_DASHED}/ not found in hack repo; create CDN RP files there first"
+    return "${OCR_RC_BLOCKED}"
+  fi
 
-  local mr_resp
-  mr_resp=$(curl -sf --request POST \
-    --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-    --header "Content-Type: application/json" \
-    --data "${mr_payload}" \
-    "${gitlab_url}/api/v4/projects/${project}/merge_requests" 2>&1)
+  # Find CDN RP files (pattern: cdn*rp.yaml)
+  local cdn_rp_files
+  cdn_rp_files=$(find "${hack_dir}" -type f -name '*.yaml' | grep -E 'cdn.*rp\.yaml$') || true
 
-  mr_url=$(printf '%s' "${mr_resp}" | jq -r '.web_url // empty')
-  if [[ -n "${mr_url}" ]]; then
-    printf 'Created CDN RP/RPA MR: %s\n' "${mr_url}"
-    printf 'Created %d file(s).\n' "${files_created}"
-  else
-    printf 'Failed to create MR: %s\n' "${mr_resp}" >&2
+  if [[ -z "${cdn_rp_files}" ]]; then
+    rm -rf "${temp}"; trap - RETURN
+    STEP_DETAILS="No CDN RP files (cdn*rp.yaml) found in hack repo at .konflux/openshift-pipelines/${MM_DASHED}/; create them first"
+    return "${OCR_RC_BLOCKED}"
+  fi
+
+  # Apply each CDN RP file to the cluster
+  local rp_file applied=0
+  while IFS= read -r rp_file; do
+    [[ -n "${rp_file}" ]] || continue
+    printf 'Applying: %s\n' "$(basename "${rp_file}")"
+    oc apply -f "${rp_file}" -n "${KONFLUX_NS}" || {
+      printf 'Failed to apply %s.\n' "$(basename "${rp_file}")" >&2
+      rm -rf "${temp}"; trap - RETURN
+      return 2
+    }
+    applied=$((applied + 1))
+  done <<< "${cdn_rp_files}"
+
+  rm -rf "${temp}"
+  trap - RETURN
+
+  # ── Part 3: Verify RP/RPA handshake for applied CDN ReleasePlans ──
+  local rp_names rp_name active handshake_ok=true
+  rp_names=$(oc get releaseplans -n "${KONFLUX_NS}" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+    | grep "cdn" | grep "${MM_DASHED}" || true)
+
+  if [[ -z "${rp_names}" ]]; then
+    printf 'No CDN ReleasePlans found for %s after apply.\n' "${MM_DASHED}" >&2
     return 2
   fi
+
+  while IFS= read -r rp_name; do
+    [[ -n "${rp_name}" ]] || continue
+    active=$(oc get releaseplan "${rp_name}" -n "${KONFLUX_NS}" \
+      -o jsonpath='{.status.releasePlanAdmission.active}' 2>/dev/null || true)
+    if [[ "${active}" == "true" ]]; then
+      printf 'RP/RPA handshake verified: %s\n' "${rp_name}"
+    else
+      printf 'RP/RPA handshake not active: %s (active=%s)\n' "${rp_name}" "${active:-<unset>}" >&2
+      handshake_ok=false
+    fi
+  done <<< "${rp_names}"
+
+  if [[ "${handshake_ok}" != true ]]; then
+    printf 'RP/RPA handshake not complete for all CDN ReleasePlans — retry later.\n' >&2
+    return 2
+  fi
+
+  printf 'Applied %d CDN RP file(s) and all RP/RPA handshakes verified.\n' "${applied}"
 }
 
 ocr_execute_step() {
