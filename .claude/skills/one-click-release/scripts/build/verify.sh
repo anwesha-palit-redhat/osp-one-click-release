@@ -30,7 +30,7 @@ ocr_step_title() {
     2.6) printf '%s' 'Wait for core snapshot' ;;
     2.7) printf '%s' 'Process nudge PRs' ;;
     2.8) printf '%s' 'Gate: snapshot + digests' ;;
-    2.9) printf '%s' 'Apply Konflux resources' ;;
+    2.9) printf '%s' 'Moved to step 1.12' ;;
     2.10) printf '%s' 'Core stage release' ;;
     2.11) printf '%s' 'OLM catalog render' ;;
     2.12) printf '%s' 'Wait for FBC build' ;;
@@ -171,30 +171,9 @@ verify_rp_version_tag() {
 }
 
 verify_2_9() {
-  ocr_require_konflux || return $?
-  local rps count bad_count bad_names
-  rps=$(ocr_oc_get releaseplans -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
-  count=$(jq --arg mm "${MM_DASHED}" '[.items[] | select(.metadata.name | contains($mm))] | length' <<<"${rps}")
-  ((count > 0)) || {
-    STEP_DETAILS="no ReleasePlans found for ${MM_DASHED}"
-    return "${OCR_RC_BLOCKED}"
-  }
-  bad_names=$(jq -r --arg mm "${MM_DASHED}" --arg vtag "v${VERSION}" --arg ver "${VERSION}" '
-    [.items[] | select(.metadata.name | contains($mm))
-      | select(
-          ([.spec.data.mapping.defaults.tags[]? | select(startswith($vtag))] | length) == 0
-          and
-          ([.spec.tenantPipeline.params[]? | select(.name == "release_version" and (.value | startswith($vtag)))] | length) == 0
-          and
-          ((.spec.data.mapping.defaults.contentGateway.productVersionName // "") | startswith($ver) | not)
-        )]
-    | .[].metadata.name' <<<"${rps}")
-  if [[ -n "${bad_names}" ]]; then
-    bad_count=$(wc -l <<<"${bad_names}" | tr -d ' ')
-    STEP_DETAILS="${count} ReleasePlan(s); ${bad_count} missing v${VERSION} tag: ${bad_names//$'\n'/, }"
-    return "${OCR_RC_BLOCKED}"
-  fi
-  STEP_DETAILS="${count} ReleasePlan(s) verified with v${VERSION} tags"
+  # Moved to step 1.12 — Konflux resources are now applied and verified
+  # during the config stage.
+  STEP_DETAILS="moved to step 1.12"
 }
 
 verify_2_10() {

@@ -28,7 +28,7 @@ ocr_describe_action() {
     1.9) printf 'Synchronize p12n-opc upstream/ with the latest OPC content.\n' ;;
     1.10) printf 'Merge or create the serve-tkn-cli submodule update PR.\n' ;;
     1.11) printf 'Manual action: create the product version GitLab MR.\n' ;;
-    1.12) printf 'Apply CDN RP files from hack repo and verify RP/RPA handshake.\n' ;;
+    1.12) printf 'Apply all Konflux resources from hack repo, verify RP version tags and CDN RP/RPA handshake.\n' ;;
   esac
 }
 
@@ -1022,7 +1022,7 @@ execute_1_12() {
     printf 'CDN RPA files confirmed in konflux-release-data.\n'
   fi
 
-  # ── Part 2: Check hack repo for CDN tenant RP files and apply them ──
+  # ── Part 2: Clone hack repo and apply ALL Konflux resources ──
   local temp
   temp=$(mktemp -d)
   trap 'rm -rf "${temp}"' RETURN
@@ -1032,37 +1032,50 @@ execute_1_12() {
   local hack_dir="${temp}/hack/.konflux/openshift-pipelines/${MM_DASHED}"
   if [[ ! -d "${hack_dir}" ]]; then
     rm -rf "${temp}"; trap - RETURN
-    STEP_DETAILS="Directory .konflux/openshift-pipelines/${MM_DASHED}/ not found in hack repo; create CDN RP files there first"
+    STEP_DETAILS="Directory .konflux/openshift-pipelines/${MM_DASHED}/ not found in hack repo"
     return "${OCR_RC_BLOCKED}"
   fi
 
-  # Find CDN RP files (pattern: cdn*rp.yaml)
-  local cdn_rp_files
-  cdn_rp_files=$(find "${hack_dir}" -type f -name '*.yaml' | grep -E 'cdn.*rp\.yaml$') || true
-
-  if [[ -z "${cdn_rp_files}" ]]; then
+  # Apply ALL Konflux resources recursively (includes RPs, RBAC, etc.)
+  oc apply -R -f "${hack_dir}/" -n "${KONFLUX_NS}" || {
+    printf 'oc apply failed for .konflux/openshift-pipelines/%s/.\n' "${MM_DASHED}" >&2
     rm -rf "${temp}"; trap - RETURN
-    STEP_DETAILS="No CDN RP files (cdn*rp.yaml) found in hack repo at .konflux/openshift-pipelines/${MM_DASHED}/; create them first"
-    return "${OCR_RC_BLOCKED}"
-  fi
-
-  # Apply each CDN RP file to the cluster
-  local rp_file applied=0
-  while IFS= read -r rp_file; do
-    [[ -n "${rp_file}" ]] || continue
-    printf 'Applying: %s\n' "$(basename "${rp_file}")"
-    oc apply -f "${rp_file}" -n "${KONFLUX_NS}" || {
-      printf 'Failed to apply %s.\n' "$(basename "${rp_file}")" >&2
-      rm -rf "${temp}"; trap - RETURN
-      return 2
-    }
-    applied=$((applied + 1))
-  done <<< "${cdn_rp_files}"
+    return 2
+  }
 
   rm -rf "${temp}"
   trap - RETURN
 
-  # ── Part 3: Verify RP/RPA handshake for applied CDN ReleasePlans ──
+  # ── Part 3: Verify ALL ReleasePlans have correct version tags ──
+  local rps rp_count bad_count bad_names
+  rps=$(ocr_oc_get releaseplans -o json) || {
+    printf 'Unable to query ReleasePlans.\n' >&2
+    return 2
+  }
+  rp_count=$(jq --arg mm "${MM_DASHED}" \
+    '[.items[] | select(.metadata.name | contains($mm))] | length' <<<"${rps}")
+  ((rp_count > 0)) || {
+    printf 'No ReleasePlans found for %s.\n' "${MM_DASHED}" >&2
+    return 2
+  }
+  bad_names=$(jq -r --arg mm "${MM_DASHED}" --arg vtag "v${VERSION}" --arg ver "${VERSION}" '
+    [.items[] | select(.metadata.name | contains($mm))
+      | select(
+          ([.spec.data.mapping.defaults.tags[]? | select(startswith($vtag))] | length) == 0
+          and
+          ([.spec.tenantPipeline.params[]? | select(.name == "release_version" and (.value | startswith($vtag)))] | length) == 0
+          and
+          ((.spec.data.mapping.defaults.contentGateway.productVersionName // "") | startswith($ver) | not)
+        )]
+    | .[].metadata.name' <<<"${rps}")
+  if [[ -n "${bad_names}" ]]; then
+    bad_count=$(wc -l <<<"${bad_names}" | tr -d ' ')
+    printf '%d ReleasePlan(s) missing v%s tag: %s\n' "${bad_count}" "${VERSION}" "${bad_names//$'\n'/, }" >&2
+    return 2
+  fi
+  printf 'All %d ReleasePlan(s) verified with v%s tags.\n' "${rp_count}" "${VERSION}"
+
+  # ── Part 4: Verify RP/RPA handshake for CDN ReleasePlans ──
   local rp_names rp_name active handshake_ok=true
   rp_names=$(oc get releaseplans -n "${KONFLUX_NS}" \
     -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
@@ -1090,7 +1103,7 @@ execute_1_12() {
     return 2
   fi
 
-  printf 'Applied %d CDN RP file(s) and all RP/RPA handshakes verified.\n' "${applied}"
+  printf 'Applied all Konflux resources, verified %d RP version tags, and CDN RP/RPA handshakes verified.\n' "${rp_count}"
 }
 
 ocr_execute_step() {
