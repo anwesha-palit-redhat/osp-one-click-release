@@ -23,10 +23,6 @@ execute_3_1() {
   return 2
 }
 
-image_digest() {
-  skopeo inspect --no-tags --override-arch amd64 --override-os linux --format '{{.Digest}}' "docker://$1" 2>/dev/null
-}
-
 # Step 3.1 prerequisite: every index stage release Succeeded with an IIB image.
 require_succeeded_state() {
   local state=$1 release rp status image ocp target snapshot
@@ -82,71 +78,7 @@ execute_3_2() {
   }
   require_succeeded_state "${state}" || return 2
 
-  if ! command -v skopeo >/dev/null 2>&1; then
-    write_copy_script "${state}"
-    return
-  fi
-  local first_image
-  first_image=$(awk -F'\t' 'NR==1 {print $4}' "${state}")
-  if [[ -z "${first_image}" ]] || ! skopeo inspect --no-tags --override-arch amd64 --override-os linux "docker://${first_image}" >/dev/null 2>&1; then
-    printf 'IIB registry is not reachable (VPN?); generating the deferred VPN copy script.\n'
-    write_copy_script "${state}"
-    return
-  fi
-
-  # Credentials come from .env, per the skill.
-  if [[ -f "${REPO_ROOT}/.env" ]]; then
-    source "${REPO_ROOT}/.env"
-  fi
-  [[ -n "${QUAY_USER:-}" && -n "${QUAY_PASSWORD:-}" ]] || {
-    printf 'QUAY_USER and QUAY_PASSWORD are required (set them in %s/.env).\n' "${REPO_ROOT}" >&2
-    return 2
-  }
-  printf '%s' "${QUAY_PASSWORD}" | skopeo login quay.io -u "${QUAY_USER}" --password-stdin
-
-  local release rp status image ocp target snapshot src_digest dst_digest
-  local pids=() ocp_list=() image_list=() target_list=()
-
-  # Copy all images in parallel — each OCP version is independent
-  while IFS=$'\t' read -r release rp status image ocp target snapshot; do
-    src_digest=$(image_digest "${image}") || src_digest=''
-    dst_digest=$(image_digest "${target}") || dst_digest=''
-    if [[ -n "${src_digest}" && "${src_digest}" == "${dst_digest}" ]]; then
-      printf 'OCP %s: already present with matching digest; skipping.\n' "${ocp}"
-      continue
-    fi
-    printf 'OCP %s: copying %s -> %s\n' "${ocp}" "${image}" "${target}"
-    skopeo copy --all "docker://${image}" "docker://${target}" --preserve-digests &
-    pids+=($!)
-    ocp_list+=("${ocp}")
-    image_list+=("${image}")
-    target_list+=("${target}")
-  done <"${state}"
-
-  # Wait for all parallel copies and collect failures
-  local failed=0 i
-  for i in "${!pids[@]}"; do
-    if wait "${pids[$i]}"; then
-      printf 'OCP %s: copy complete.\n' "${ocp_list[$i]}"
-    else
-      printf 'OCP %s: copy FAILED (%s -> %s)\n' "${ocp_list[$i]}" "${image_list[$i]}" "${target_list[$i]}" >&2
-      failed=1
-    fi
-  done
-
-  # Re-verify digests after all copies
-  local src_digest dst_digest
-  while IFS=$'\t' read -r release rp status image ocp target snapshot; do
-    src_digest=$(image_digest "${image}") || src_digest=''
-    dst_digest=$(image_digest "${target}") || dst_digest=''
-    if [[ -n "${src_digest}" && "${src_digest}" == "${dst_digest}" ]]; then
-      printf 'OCP %s: DONE (%s)\n' "${ocp}" "${dst_digest}"
-    else
-      printf 'OCP %s: PENDING (source=%s target=%s)\n' "${ocp}" "${src_digest:-?}" "${dst_digest:-missing}" >&2
-      failed=1
-    fi
-  done <"${state}"
-  return "${failed}"
+  write_copy_script "${state}"
 }
 
 ocr_execute_step() { case "$1" in 3.1) execute_3_1 ;; 3.2) execute_3_2 ;; esac }
