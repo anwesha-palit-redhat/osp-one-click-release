@@ -389,6 +389,47 @@ ocr_operator_revision_is_generated() {
   [[ "${actors_ok}" == true && "${files_ok}" == true ]]
 }
 
+# Verify that FBC source files at a given revision reference the expected core
+# operator image digest.  Returns 0 if the digest is found, 1 if not (warning
+# only — callers decide whether to block).
+ocr_verify_fbc_references_core_image() {
+  local fbc_rev=$1 core_image=$2 app_label=$3
+  local core_digest tree_json
+
+  # Extract the sha256 digest from the core image reference
+  if [[ "${core_image}" == *@sha256:* ]]; then
+    core_digest=${core_image##*@sha256:}
+  else
+    printf '%s⚠ WARNING:%s %s — core image has no sha256 digest; skipping FBC image check\n' \
+      "${OCR_YELLOW}${OCR_BOLD}" "${OCR_RESET}" "${app_label}" >&2
+    return 0
+  fi
+
+  # Fetch the git tree at the FBC revision, filtering to FBC-relevant paths
+  tree_json=$(gh api "repos/openshift-pipelines/operator/git/trees/${fbc_rev}?recursive=1" \
+    --jq '[.tree[] | select(.path | test("^\\.konflux/olm-catalog/|^bundle/|^bundle\\.")) | .path]' 2>/dev/null) || {
+    printf '%s⚠ WARNING:%s %s — unable to fetch git tree at %s; skipping FBC image check\n' \
+      "${OCR_YELLOW}${OCR_BOLD}" "${OCR_RESET}" "${app_label}" "${fbc_rev:0:12}" >&2
+    return 0
+  }
+
+  # Read each FBC-relevant file and search for the core digest
+  local path file_content
+  while IFS= read -r path; do
+    [[ -n "${path}" ]] || continue
+    file_content=$(gh api "repos/openshift-pipelines/operator/contents/${path}?ref=${fbc_rev}" \
+      --jq '.content' 2>/dev/null | base64 -d 2>/dev/null) || continue
+    if grep -qF "${core_digest}" <<<"${file_content}"; then
+      return 0
+    fi
+  done < <(jq -r '.[]' <<<"${tree_json}" 2>/dev/null)
+
+  # Digest not found — warn but do not block
+  printf '%s⚠ WARNING:%s %s — FBC at revision %s does not reference core image digest sha256:%s\n' \
+    "${OCR_YELLOW}${OCR_BOLD}" "${OCR_RESET}" "${app_label}" "${fbc_rev:0:12}" "${core_digest:0:12}" >&2
+  return 1
+}
+
 ocr_normalize_stage() {
   case "${1:-}" in
     config) printf '%s\n' config ;;

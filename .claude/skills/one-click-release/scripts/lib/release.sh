@@ -8,6 +8,11 @@ ocr_latest_snapshot() {
     -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | awk '{print $NF}'
 }
 
+ocr_snapshot_component_image() {
+  local snapshot=$1
+  ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.spec.components[0].containerImage}'
+}
+
 ocr_release_condition() {
   local release_name=$1
   ocr_oc_get release "${release_name}" \

@@ -208,6 +208,7 @@ verify_4_4() {
 verify_4_5() {
   ocr_require_konflux || return $?
   local apps app snapshot rev head created merge_sha ancestry bundle_app
+  local image_mismatch=''
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
   bundle_app=$(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("bundle") and contains($mm)) | .metadata.name' <<<"${apps}" | head -1)
 
@@ -233,6 +234,33 @@ verify_4_5() {
     return "${OCR_RC_BLOCKED}"
   }
   ocr_operator_revision_is_generated "${rev}" "${head}" || return "${OCR_RC_BLOCKED}"
+
+  # Verify FBC bundle references the correct core image digest from production
+  local core_app core_snapshot core_image
+  core_app=$(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("core") and contains($mm)) | .metadata.name' <<<"${apps}" | head -1)
+  if [[ -n "${core_app}" ]]; then
+    # Try per-app state file first (written by build stage verify_2_6 / verify_2_10)
+    if [[ -f "${REPORT_BASE}/.state/stage-${core_app}-snapshot" ]]; then
+      core_snapshot=$(<"${REPORT_BASE}/.state/stage-${core_app}-snapshot")
+    fi
+    # Fall back to stage-vars.env if available
+    if [[ -z "${core_snapshot:-}" && -f "${REPORT_BASE}/stage-vars.env" ]]; then
+      core_snapshot=$(grep -m1 '^STAGE_CORE_SNAPSHOT=' "${REPORT_BASE}/stage-vars.env" | cut -d= -f2-) || core_snapshot=''
+    fi
+    if [[ -n "${core_snapshot:-}" ]]; then
+      core_image=$(ocr_snapshot_component_image "${core_snapshot}" 2>/dev/null)
+      if [[ -n "${core_image}" ]]; then
+        if ! ocr_verify_fbc_references_core_image "${rev}" "${core_image}" "bundle"; then
+          image_mismatch+=" bundle"
+        fi
+      fi
+    fi
+  fi
+
+  if [[ -n "${image_mismatch}" ]]; then
+    STEP_DETAILS+="; ⚠ core image digest mismatch:${image_mismatch}"
+  fi
+
   # Pin the production bundle snapshot for use by execute_4_6
   printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/prod-${bundle_app}-snapshot"
 }
