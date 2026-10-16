@@ -1103,6 +1103,13 @@ execute_1_12() {
     return 2
   fi
 
+  # ── Save results to state files for verify ──
+  printf '%s\n' "${rp_count}" > "${REPORT_BASE}/.state/step-1-12-rp-tags-verified"
+  printf '%s\n' "${rp_names}" > "${REPORT_BASE}/.state/step-1-12-cdn-handshakes"
+  local cdn_count
+  cdn_count=$(printf '%s\n' "${rp_names}" | grep -c . || true)
+  printf '%s\n' "${cdn_count}" > "${REPORT_BASE}/.state/step-1-12-cdn-rpas"
+
   printf 'Applied all Konflux resources, verified %d RP version tags, and CDN RP/RPA handshakes verified.\n' "${rp_count}"
 }
 

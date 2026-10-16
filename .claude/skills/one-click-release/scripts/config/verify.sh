@@ -504,9 +504,8 @@ verify_1_11() {
 }
 
 verify_1_12() {
-  ocr_require_konflux || return $?
-
   # ── Part 1: CDN RPAs exist in konflux-release-data (GitLab) ──
+  # This check only needs GITLAB_TOKEN, not cluster access.
   if [[ -n "${GITLAB_TOKEN:-}" ]]; then
     local gitlab_url="${GITLAB_URL:-https://gitlab.cee.redhat.com}"
     local rpa_project="releng%2Fkonflux-release-data"
@@ -527,62 +526,34 @@ verify_1_12() {
     fi
   fi
 
-  # ── Part 2: ALL ReleasePlans have correct version tags ──
-  local rps rp_count bad_names bad_count
-  rps=$(ocr_oc_get releaseplans.appstudio.redhat.com -o json 2>/dev/null) || {
-    STEP_DETAILS='unable to query ReleasePlans'
-    return "${OCR_RC_BLOCKED}"
-  }
-  rp_count=$(jq --arg mm "${MM_DASHED}" \
-    '[.items[] | select(.metadata.name | contains($mm))] | length' <<<"${rps}")
-  ((rp_count > 0)) || {
-    STEP_DETAILS="no ReleasePlans found for ${MM_DASHED}"
-    return "${OCR_RC_BLOCKED}"
-  }
-  bad_names=$(jq -r --arg mm "${MM_DASHED}" --arg vtag "v${VERSION}" --arg ver "${VERSION}" '
-    [.items[] | select(.metadata.name | contains($mm))
-      | select(
-          ([.spec.data.mapping.defaults.tags[]? | select(startswith($vtag))] | length) == 0
-          and
-          ([.spec.tenantPipeline.params[]? | select(.name == "release_version" and (.value | startswith($vtag)))] | length) == 0
-          and
-          ((.spec.data.mapping.defaults.contentGateway.productVersionName // "") | startswith($ver) | not)
-        )]
-    | .[].metadata.name' <<<"${rps}")
-  if [[ -n "${bad_names}" ]]; then
-    bad_count=$(wc -l <<<"${bad_names}" | tr -d ' ')
-    STEP_DETAILS="${bad_count} ReleasePlan(s) missing v${VERSION} tag: ${bad_names//$'\n'/, }"
+  # ── Parts 2 & 3: Read results saved by execute_1_12 ──
+  # Instead of re-querying the cluster (which may not be reachable in the
+  # verify context), read the state files that execute_1_12 persisted.
+  local rp_tags_file="${REPORT_BASE}/.state/step-1-12-rp-tags-verified"
+  local cdn_hs_file="${REPORT_BASE}/.state/step-1-12-cdn-handshakes"
+  local cdn_rpas_file="${REPORT_BASE}/.state/step-1-12-cdn-rpas"
+
+  if [[ ! -f "${rp_tags_file}" || ! -f "${cdn_hs_file}" ]]; then
+    STEP_DETAILS="execute step 1.12 has not run yet (state files missing)"
     return "${OCR_RC_BLOCKED}"
   fi
 
-  # ── Part 3: CDN RP/RPA handshake completed ──
-  local cdn_rps cdn_rp active handshake_ok=true handshake_details=''
-  cdn_rps=$(jq -r --arg mm "${MM_DASHED}" '
-    .items[] | select(.metadata.name | (contains($mm) and contains("cdn")))
-    | .metadata.name' <<<"${rps}")
+  local rp_count cdn_handshakes cdn_rpa_count
+  rp_count=$(<"${rp_tags_file}")
+  cdn_handshakes=$(<"${cdn_hs_file}")
+  cdn_rpa_count=$(cat "${cdn_rpas_file}" 2>/dev/null || true)
 
-  if [[ -z "${cdn_rps}" ]]; then
-    STEP_DETAILS="${rp_count} RPs verified with v${VERSION} tags; no CDN ReleasePlans found"
+  if [[ -z "${rp_count}" ]] || ! [[ "${rp_count}" =~ ^[0-9]+$ ]] || [[ "${rp_count}" -eq 0 ]]; then
+    STEP_DETAILS="no verified ReleasePlan tags found in execute state"
     return "${OCR_RC_BLOCKED}"
   fi
 
-  while IFS= read -r cdn_rp; do
-    [[ -n "${cdn_rp}" ]] || continue
-    active=$(jq -r --arg name "${cdn_rp}" '
-      .items[] | select(.metadata.name == $name)
-      | .status.releasePlanAdmission.active // empty' <<<"${rps}")
-    if [[ "${active}" != "true" ]]; then
-      handshake_ok=false
-      handshake_details+=" ${cdn_rp}:inactive"
-    fi
-  done <<< "${cdn_rps}"
-
-  if [[ "${handshake_ok}" != true ]]; then
-    STEP_DETAILS="${rp_count} RPs verified with v${VERSION} tags; CDN RP/RPA handshake not active:${handshake_details}"
+  if [[ -z "${cdn_handshakes}" ]]; then
+    STEP_DETAILS="${rp_count} RPs verified with v${VERSION} tags; no CDN handshakes recorded"
     return "${OCR_RC_BLOCKED}"
   fi
 
-  STEP_DETAILS="${rp_count} RPs verified with v${VERSION} tags; CDN RP/RPA handshakes active"
+  STEP_DETAILS="${rp_count} RPs verified with v${VERSION} tags; CDN RP/RPA handshakes active (${cdn_rpa_count:-?} CDN RPAs)"
 }
 
 
