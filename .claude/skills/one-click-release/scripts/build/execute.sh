@@ -24,7 +24,7 @@ ocr_describe_action() {
     2.6) printf 'Trigger rebuild commits for repositories stale in the core snapshot.\n' ;;
     2.7) printf 'Process nudge PRs, including conflict consolidation when required.\n' ;;
     2.8) printf 'Gate: re-verify snapshot and digest checks both pass.\n' ;;
-    2.9) printf 'Apply Konflux resource YAMLs from hack repo and verify ReleasePlan version tags.\n' ;;
+    2.9) printf 'Moved to step 1.12.\n' ;;
     2.10) printf 'Create the core stage Release CR from the latest verified snapshot.\n' ;;
     2.11) printf 'Run staging operator-update-images, merge its verified PR, and render the staging catalog.\n' ;;
     2.12) printf 'Trigger bundle and index rebuilds for stale FBC snapshots.\n' ;;
@@ -229,29 +229,9 @@ create_stage_release() {
 }
 
 execute_2_9() {
-  ocr_require_konflux || return 2
-  local temp
-  temp=$(mktemp -d)
-  git clone --depth 1 https://github.com/openshift-pipelines/hack.git "${temp}/hack"
-  oc apply -R -f "${temp}/hack/.konflux/openshift-pipelines/${MM_DASHED}/" -n "${KONFLUX_NS}"
-  rm -rf "${temp}"
-  # Verify all ReleasePlans have correct version tags
-  local rps rp_count bad_count
-  rps=$(ocr_oc_get releaseplans -o json)
-  rp_count=$(jq --arg mm "${MM_DASHED}" '[.items[] | select(.metadata.name | contains($mm))] | length' <<<"${rps}")
-  ((rp_count > 0)) || {
-    printf 'No ReleasePlans found for %s.\n' "${MM_DASHED}" >&2
-    return 2
-  }
-  bad_count=$(jq --arg mm "${MM_DASHED}" --arg vtag "v${VERSION}" '
-    [.items[] | select(.metadata.name | contains($mm))
-      | select(([.spec.data.mapping.defaults.tags[]? | select(startswith($vtag))] | length) == 0)]
-    | length' <<<"${rps}")
-  if ((bad_count > 0)); then
-    printf '%d ReleasePlan(s) missing v%s in tags.\n' "${bad_count}" "${VERSION}" >&2
-    return 2
-  fi
-  printf 'Applied Konflux resources; all %d ReleasePlan(s) verified with v%s tags.\n' "${rp_count}" "${VERSION}"
+  # Moved to step 1.12 — Konflux resources are now applied and verified
+  # during the config stage.
+  printf 'Skipped: Konflux resource apply and RP version-tag verification moved to step 1.12.\n'
 }
 
 execute_2_10() {

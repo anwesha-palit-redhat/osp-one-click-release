@@ -30,7 +30,7 @@ ocr_step_title() {
     2.6) printf '%s' 'Wait for core snapshot' ;;
     2.7) printf '%s' 'Process nudge PRs' ;;
     2.8) printf '%s' 'Gate: snapshot + digests' ;;
-    2.9) printf '%s' 'Apply Konflux resources' ;;
+    2.9) printf '%s' 'Moved to step 1.12' ;;
     2.10) printf '%s' 'Core stage release' ;;
     2.11) printf '%s' 'OLM catalog render' ;;
     2.12) printf '%s' 'Wait for FBC build' ;;
@@ -171,30 +171,9 @@ verify_rp_version_tag() {
 }
 
 verify_2_9() {
-  ocr_require_konflux || return $?
-  local rps count bad_count bad_names
-  rps=$(ocr_oc_get releaseplans -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
-  count=$(jq --arg mm "${MM_DASHED}" '[.items[] | select(.metadata.name | contains($mm))] | length' <<<"${rps}")
-  ((count > 0)) || {
-    STEP_DETAILS="no ReleasePlans found for ${MM_DASHED}"
-    return "${OCR_RC_BLOCKED}"
-  }
-  bad_names=$(jq -r --arg mm "${MM_DASHED}" --arg vtag "v${VERSION}" --arg ver "${VERSION}" '
-    [.items[] | select(.metadata.name | contains($mm))
-      | select(
-          ([.spec.data.mapping.defaults.tags[]? | select(startswith($vtag))] | length) == 0
-          and
-          ([.spec.tenantPipeline.params[]? | select(.name == "release_version" and (.value | startswith($vtag)))] | length) == 0
-          and
-          ((.spec.data.mapping.defaults.contentGateway.productVersionName // "") | startswith($ver) | not)
-        )]
-    | .[].metadata.name' <<<"${rps}")
-  if [[ -n "${bad_names}" ]]; then
-    bad_count=$(wc -l <<<"${bad_names}" | tr -d ' ')
-    STEP_DETAILS="${count} ReleasePlan(s); ${bad_count} missing v${VERSION} tag: ${bad_names//$'\n'/, }"
-    return "${OCR_RC_BLOCKED}"
-  fi
-  STEP_DETAILS="${count} ReleasePlan(s) verified with v${VERSION} tags"
+  # Moved to step 1.12 — Konflux resources are now applied and verified
+  # during the config stage.
+  STEP_DETAILS="moved to step 1.12"
 }
 
 verify_2_10() {
@@ -270,6 +249,7 @@ verify_2_11() {
 verify_2_12() {
   ocr_require_konflux || return $?
   local apps operator_head bundle snapshot rev stale='' checked=0 app bundle_status idx_status
+  local image_mismatch=''
   : >"${REPORT_BASE}/.state/fbc-snapshot-comparison.tsv"
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
   operator_head=$(git ls-remote https://github.com/openshift-pipelines/operator.git "refs/heads/${RELEASE_BRANCH}" | awk '{print $1}')
@@ -284,6 +264,19 @@ verify_2_12() {
     bundle_status="CURRENT"
     # Pin the verified bundle snapshot so verify_2_13/execute_2_13 use the same one
     printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${bundle}-snapshot"
+
+    # Verify FBC bundle references the correct core image digest
+    local core_app core_snapshot core_image
+    core_app=$(find_app core)
+    if [[ -n "${core_app}" && -f "${REPORT_BASE}/.state/stage-${core_app}-snapshot" ]]; then
+      core_snapshot=$(<"${REPORT_BASE}/.state/stage-${core_app}-snapshot")
+      core_image=$(ocr_snapshot_component_image "${core_snapshot}" 2>/dev/null)
+      if [[ -n "${core_image}" ]]; then
+        if ! ocr_verify_fbc_references_core_image "${rev}" "${core_image}" "bundle"; then
+          image_mismatch+=" bundle"
+        fi
+      fi
+    fi
   else
     stale+=" bundle"
     bundle_status="GENERATED GAP/STALE"
@@ -300,6 +293,13 @@ verify_2_12() {
       idx_status="CURRENT"
       # Pin the verified index snapshot so verify_2_14/execute_2_14 use the same one
       printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${app}-snapshot"
+
+      # Verify index app also references the correct core image digest
+      if [[ -n "${core_app:-}" && -n "${core_image:-}" ]]; then
+        if ! ocr_verify_fbc_references_core_image "${rev}" "${core_image}" "${app}"; then
+          image_mismatch+=" ${app}"
+        fi
+      fi
     else
       stale+=" ${app}"
       idx_status="GENERATED GAP/STALE"
@@ -308,6 +308,9 @@ verify_2_12() {
       >>"${REPORT_BASE}/.state/fbc-snapshot-comparison.tsv"
   done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
   STEP_DETAILS="bundle snapshot present; ${checked} index snapshots checked"
+  if [[ -n "${image_mismatch}" ]]; then
+    STEP_DETAILS+="; ⚠ core image digest mismatch:${image_mismatch}"
+  fi
   if [[ -n "${stale}" ]]; then
     STEP_DETAILS+="; stale:${stale}"
     return "${OCR_RC_BLOCKED}"
