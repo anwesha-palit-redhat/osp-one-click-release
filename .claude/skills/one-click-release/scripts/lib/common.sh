@@ -219,7 +219,7 @@ ocr_require_konflux() {
     STEP_DETAILS="KONFLUX_SERVER or KONFLUX_TOKEN missing"
     return "${OCR_RC_SKIPPED}"
   fi
-  ocr_require_command oc
+  ocr_require_command oc || return $?
   if [[ -z "${OCR_KUBECONFIG_FILE:-}" ]]; then
     OCR_KUBECONFIG_FILE=$(mktemp)
     chmod 600 "${OCR_KUBECONFIG_FILE}"
