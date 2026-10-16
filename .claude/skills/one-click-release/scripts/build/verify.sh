@@ -304,6 +304,7 @@ verify_2_12() {
 verify_2_13() {
   ocr_require_konflux || return $?
   local apps releases app snapshot total=0 succeeded=0 status
+  local state releases_file expected_file superseded count bad
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json 2>/dev/null) || return "${OCR_RC_BLOCKED}"
   releases=$(release_status_json) || return "${OCR_RC_BLOCKED}"
   # Prerequisite: bundle stage release must have succeeded
@@ -313,6 +314,7 @@ verify_2_13() {
     STEP_DETAILS='bundle stage release has not succeeded; index cannot be released until bundle is complete'
     return "${OCR_RC_BLOCKED}"
   fi
+  expected_file=$(mktemp)
   while IFS= read -r app; do
     [[ -n "${app}" ]] || continue
     # Use pinned snapshot if it exists for this index app
@@ -323,6 +325,7 @@ verify_2_13() {
     fi
     [[ -z "${snapshot}" ]] && continue
     ((total += 1))
+    printf '%s\t%s\n' "${app}" "${snapshot}" >>"${expected_file}"
     status=$(jq -r --arg mm "${MM_DASHED}" --arg snap "${snapshot}" '
       if any(.items[]; .spec.snapshot==$snap and (.spec.releasePlan | contains($mm) and contains("stage")) and
         ((.spec.releasePlan | contains("fbc")) or (.spec.releasePlan | contains("index"))) and
@@ -333,8 +336,63 @@ verify_2_13() {
       printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${app}-snapshot"
     fi
   done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
-  STEP_DETAILS="${succeeded}/${total} index stage releases succeeded"
-  ((total > 0 && succeeded == total)) || return "${OCR_RC_BLOCKED}"
+  if ! ((total > 0 && succeeded == total)); then
+    STEP_DETAILS="${succeeded}/${total} index stage releases succeeded"
+    rm -f "${expected_file}"
+    return "${OCR_RC_BLOCKED}"
+  fi
+  # Extract IIB image digests and write state file for image-copy stage
+  state="${REPORT_BASE}/.state/image-copy-images.tsv"
+  releases_file=$(mktemp)
+  printf '%s\n' "${releases}" >"${releases_file}"
+  python3 - "${MM_DASHED}" "${VERSION}" "${releases_file}" "${expected_file}" >"${state}" <<'PY'
+import json, re, sys
+mm, version, path, expected_path = sys.argv[1:]
+data = json.load(open(path))
+
+def iib_images(item):
+    """Return {ocp_version: index_image_resolved} from a release CR."""
+    art = item.get('status', {}).get('artifacts', {}) or {}
+    out = {}
+    for c in art.get('components', []) or []:
+        img = c.get('index_image_resolved', '')
+        if img:
+            out[c.get('ocp_version', '').lstrip('v')] = img
+    for ver, d in (art.get('index_image', {}) or {}).items():
+        img = d.get('index_image_resolved', '')
+        if img:
+            out.setdefault(ver.lstrip('v'), img)
+    return out
+
+def released(item):
+    return next((c.get('status') for c in item.get('status', {}).get('conditions', [])
+                 if c.get('type') == 'Released'), 'Unknown')
+
+for line in open(expected_path):
+    app, snapshot = line.rstrip('\n').split('\t')
+    m = re.search(r'index-(\d+)-(\d+)-' + re.escape(mm), app)
+    ocp = f'{m.group(1)}.{m.group(2)}' if m else 'unknown'
+    candidates = []
+    for item in data.get('items', []):
+        rp = item.get('spec', {}).get('releasePlan', '')
+        if item.get('spec', {}).get('snapshot') != snapshot: continue
+        if 'stage' not in rp or not ('fbc' in rp or 'index' in rp): continue
+        candidates.append(item)
+    candidates.sort(key=lambda x: (x['metadata'].get('creationTimestamp', ''), x['metadata'].get('name', '')))
+    successful = [x for x in candidates if released(x) == 'True']
+    item = (successful[-1] if successful else candidates[-1] if candidates
+            else {'metadata': {'name': 'missing'}, 'spec': {'releasePlan': ''}, 'status': {}})
+    image = iib_images(item).get(ocp, '')
+    target = f'quay.io/openshift-pipeline/pipelines-index-{ocp}:v{version}-stage'
+    print('\t'.join([item['metadata']['name'], item['spec'].get('releasePlan', ''),
+                     released(item), image, ocp, target, snapshot]))
+PY
+  superseded=$(jq --arg mm "${MM_DASHED}" '[.items[] | select(.spec.releasePlan|contains($mm) and contains("stage")) | select(any(.status.conditions[]?; .type=="Released" and .status=="False"))] | length' <<<"${releases}")
+  rm -f "${releases_file}" "${expected_file}"
+  count=$(wc -l <"${state}" | tr -d ' ')
+  bad=$(awk -F'\t' '$3 != "True" || $4 !~ /^registry-proxy\.engineering\.redhat\.com\/rh-osbs\/iib@sha256:/ {n++} END {print n+0}' "${state}")
+  STEP_DETAILS="${succeeded}/${total} index stage releases succeeded; ${count} IIB images extracted; ${bad} without valid digest; ${superseded} superseded failures"
+  ((count > 0 && bad == 0)) || return "${OCR_RC_BLOCKED}"
   verify_rp_version_tag index
 }
 

@@ -24,74 +24,15 @@ ocr_step_title() {
 image_state_file() { printf '%s/.state/image-copy-images.tsv' "${REPORT_BASE}"; }
 
 verify_3_1() {
-  ocr_require_konflux || return $?
-  local releases apps state count bad releases_file expected_file superseded
-  releases=$(ocr_oc_get releases -o json 2>/dev/null) || {
-    STEP_DETAILS='unable to query stage release CRs'
-    return "${OCR_RC_BLOCKED}"
-  }
-  apps=$(ocr_oc_get applications.appstudio.redhat.com -o json 2>/dev/null) || {
-    STEP_DETAILS='unable to query expected index applications'
-    return "${OCR_RC_BLOCKED}"
-  }
+  local state count bad
   state=$(image_state_file)
-  releases_file=$(mktemp)
-  expected_file=$(mktemp)
-  printf '%s\n' "${releases}" >"${releases_file}"
-  while IFS= read -r app; do
-    # Use the pinned index snapshot from build step 2.14 to avoid stray nudge snapshots
-    local snap=''
-    [[ -f "${REPORT_BASE}/.state/stage-${app}-snapshot" ]] && snap=$(<"${REPORT_BASE}/.state/stage-${app}-snapshot")
-    [[ -n "${snap}" ]] || snap=$(ocr_latest_snapshot "${app}")
-    printf '%s\t%s\n' "${app}" "${snap}" >>"${expected_file}"
-  done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
-    python3 - "${MM_DASHED}" "${VERSION}" "${releases_file}" "${expected_file}" >"${state}" <<'PY'
-import json, re, sys
-mm, version, path, expected_path = sys.argv[1:]
-data = json.load(open(path))
-
-def iib_images(item):
-    """Return {ocp_version: index_image_resolved} from a release CR."""
-    art = item.get('status', {}).get('artifacts', {}) or {}
-    out = {}
-    for c in art.get('components', []) or []:
-        img = c.get('index_image_resolved', '')
-        if img:
-            out[c.get('ocp_version', '').lstrip('v')] = img
-    for ver, d in (art.get('index_image', {}) or {}).items():
-        img = d.get('index_image_resolved', '')
-        if img:
-            out.setdefault(ver.lstrip('v'), img)
-    return out
-
-def released(item):
-    return next((c.get('status') for c in item.get('status', {}).get('conditions', [])
-                 if c.get('type') == 'Released'), 'Unknown')
-
-for line in open(expected_path):
-    app, snapshot = line.rstrip('\n').split('\t')
-    m = re.search(r'index-(\d+)-(\d+)-' + re.escape(mm), app)
-    ocp = f'{m.group(1)}.{m.group(2)}' if m else 'unknown'
-    candidates = []
-    for item in data.get('items', []):
-        rp = item.get('spec', {}).get('releasePlan', '')
-        if item.get('spec', {}).get('snapshot') != snapshot: continue
-        if 'stage' not in rp or not ('fbc' in rp or 'index' in rp): continue
-        candidates.append(item)
-    candidates.sort(key=lambda x: (x['metadata'].get('creationTimestamp', ''), x['metadata'].get('name', '')))
-    successful = [x for x in candidates if released(x) == 'True']
-    item = (successful[-1] if successful else candidates[-1] if candidates
-            else {'metadata': {'name': 'missing'}, 'spec': {'releasePlan': ''}, 'status': {}})
-    image = iib_images(item).get(ocp, '')
-    target = f'quay.io/openshift-pipeline/pipelines-index-{ocp}:v{version}-stage'
-    print('\t'.join([item['metadata']['name'], item['spec'].get('releasePlan', ''),
-                     released(item), image, ocp, target, snapshot]))
-PY
-  superseded=$(jq --arg mm "${MM_DASHED}" '[.items[] | select(.spec.releasePlan|contains($mm) and contains("stage")) | select(any(.status.conditions[]?; .type=="Released" and .status=="False"))] | length' <<<"${releases}")
-  rm -f "${releases_file}" "${expected_file}"
+  if [[ ! -s "${state}" ]]; then
+    STEP_DETAILS='IIB image state file not found; complete build stage first'
+    return "${OCR_RC_BLOCKED}"
+  fi
   count=$(wc -l <"${state}" | tr -d ' ')
   bad=$(awk -F'\t' '$3 != "True" || $4 !~ /^registry-proxy\.engineering\.redhat\.com\/rh-osbs\/iib@sha256:/ {n++} END {print n+0}' "${state}")
-  STEP_DETAILS="${count} current index snapshots selected; ${bad} without a successful IIB digest; ${superseded} superseded failed attempts retained as history"
+  STEP_DETAILS="${count} index images in state; ${bad} without a successful IIB digest"
   ((count > 0 && bad == 0)) || return "${OCR_RC_BLOCKED}"
 }
 
