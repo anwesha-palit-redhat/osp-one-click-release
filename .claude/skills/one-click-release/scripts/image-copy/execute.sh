@@ -52,15 +52,33 @@ write_copy_script() {
     printf 'source "$(dirname "$0")/../.env"\n'
     printf 'echo "${QUAY_PASSWORD}" | skopeo login quay.io -u "${QUAY_USER}" --password-stdin\n\n'
     printf 'echo "=== Running image copy script ==="\n'
-    printf 'echo "Copying %s stage index images to quay.io..."\n\n' "${VERSION}"
+    printf 'echo "Copying %s stage index images to quay.io (parallel)..."\n\n' "${VERSION}"
+    printf 'declare -A PIDS\n'
+    printf 'FAILED=0\n\n'
     while IFS=$'\t' read -r release rp status image ocp target snapshot; do
       printf '# OCP %s\n' "${ocp}"
-      printf 'skopeo copy --all \\\n'
-      printf '  docker://%s \\\n' "${image}"
-      printf '  docker://%s \\\n' "${target}"
-      printf '  --preserve-digests\n'
+      printf '(\n'
+      printf '  skopeo copy --all \\\n'
+      printf '    docker://%s \\\n' "${image}"
+      printf '    docker://%s \\\n' "${target}"
+      printf '    --preserve-digests\n'
+      printf ') &\n'
+      printf 'PIDS[$!]="%s"\n\n' "${ocp}"
     done <"${state}"
-    printf '\necho "Done — all index images copied."\n'
+    printf 'echo "Waiting for all copies to complete..."\n'
+    printf 'for pid in "${!PIDS[@]}"; do\n'
+    printf '  if wait "${pid}"; then\n'
+    printf '    echo "OCP ${PIDS[${pid}]} copy succeeded"\n'
+    printf '  else\n'
+    printf '    echo "OCP ${PIDS[${pid}]} copy FAILED"\n'
+    printf '    FAILED=1\n'
+    printf '  fi\n'
+    printf 'done\n\n'
+    printf 'if [[ "${FAILED}" -ne 0 ]]; then\n'
+    printf '  echo "Some image copies failed."\n'
+    printf '  exit 1\n'
+    printf 'fi\n\n'
+    printf 'echo "Done — all index images copied."\n'
   } >"${path}"
   chmod +x "${path}"
   local shown
