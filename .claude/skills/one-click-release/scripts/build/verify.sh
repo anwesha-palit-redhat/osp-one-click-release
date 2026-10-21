@@ -194,20 +194,20 @@ verify_2_7() {
 verify_2_10() {
   local csv runs run_url state catalogs diff registry_ok=true error
 
-  # Find the most recent commit on the release branch that modified the OLM catalog
-  local catalog_sha catalog_pr_json
-  catalog_sha=$(gh api "repos/openshift-pipelines/operator/commits?sha=${RELEASE_BRANCH}&path=.konflux/olm-catalog&per_page=1" --jq '.[0].sha // empty' 2>/dev/null)
+  # Look up the staging CSV PR by its well-known branch name first
+  csv=$(gh pr list --repo openshift-pipelines/operator \
+    --head "actions/update/operator-update-images-${RELEASE_BRANCH}" --state merged --limit 1 \
+    --json number,url,mergedAt)
 
-  if [[ -n "${catalog_sha}" ]]; then
-    csv=$(gh api "repos/openshift-pipelines/operator/commits/${catalog_sha}/pulls" \
-      --jq '[.[] | select(.merged_at != null) | {number, url: .html_url, mergedAt: .merged_at}]' 2>/dev/null)
-  fi
-
-  # Fallback to old method if commits API returned nothing
+  # Fallback: find the most recent commit that modified the OLM catalog,
+  # but only accept PRs whose branch matches operator-update-images
   if [[ -z "${csv}" || "$(jq length <<<"${csv}" 2>/dev/null)" -eq 0 ]]; then
-    csv=$(gh pr list --repo openshift-pipelines/operator \
-      --head "actions/update/operator-update-images-${RELEASE_BRANCH}" --state merged --limit 1 \
-      --json number,url,mergedAt)
+    local catalog_sha
+    catalog_sha=$(gh api "repos/openshift-pipelines/operator/commits?sha=${RELEASE_BRANCH}&path=.konflux/olm-catalog&per_page=1" --jq '.[0].sha // empty' 2>/dev/null)
+    if [[ -n "${catalog_sha}" ]]; then
+      csv=$(gh api "repos/openshift-pipelines/operator/commits/${catalog_sha}/pulls" \
+        --jq '[.[] | select(.merged_at != null) | select(.head.ref | test("operator-update-images")) | {number, url: .html_url, mergedAt: .merged_at}]' 2>/dev/null)
+    fi
   fi
   runs=$(gh run list --repo openshift-pipelines/operator --workflow=render-olm-catalog.yaml --limit 25 \
     --json status,conclusion,createdAt,displayTitle,headBranch,url,event 2>"${REPORT_BASE}/.state/gh-error") || {
@@ -226,7 +226,7 @@ verify_2_10() {
       ocr_fail_with_error 'unable to inspect staging CSV PR diff' "${error}"
       return $?
     }
-    grep -E '^\+.*image:.*(devel|staging)' <<<"${diff}" | grep -vE 'quay\.io/redhat-user-workloads' >/dev/null && registry_ok=false
+    grep -E '^\+.*image:.*quay\.io/' <<<"${diff}" | grep -vE 'quay\.io/redhat-user-workloads' >/dev/null && registry_ok=false
   fi
   catalogs=$(gh api "repos/openshift-pipelines/operator/commits?sha=${RELEASE_BRANCH}&per_page=30" \
     --jq '[.[] | select(.commit.message | test("catalog|render|OCP catalog"; "i"))] | length' 2>"${REPORT_BASE}/.state/gh-error") || {
@@ -234,7 +234,25 @@ verify_2_10() {
     ocr_fail_with_error 'unable to verify catalog commits' "${error}"
     return $?
   }
-  STEP_DETAILS="CSV PR merged=${state:-no}; staging registries=${registry_ok}; staging render=${run_status:-missing} at $(ocr_abs_time "${run_created}"); catalog commits=${catalogs}"
+  local release_stage
+  release_stage=$(gh api "repos/openshift-pipelines/operator/contents/olm/release-stage.txt?ref=${RELEASE_BRANCH}" --jq '.content' 2>/dev/null | base64 -d | tr -d '[:space:]')
+  if [[ "${release_stage}" != "staging" ]]; then
+    registry_ok=false
+  fi
+  # Check the CSV on the release branch for images still pointing at quay.io
+  # (not redhat-user-workloads, which are Konflux build refs).  A non-zero
+  # count means operator-update-images skipped those because the staging
+  # registry didn't have them yet.
+  local csv_content missing_images
+  csv_content=$(gh api "repos/openshift-pipelines/operator/contents/.konflux/olm-catalog/bundle/manifests/openshift-pipelines-operator-rh.clusterserviceversion.yaml?ref=${RELEASE_BRANCH}" \
+    --jq '.content' 2>/dev/null | base64 -d 2>/dev/null)
+  if [[ -n "${csv_content}" ]]; then
+    missing_images=$(grep -oE 'quay\.io/openshift-pipeline/[^ "]+' <<<"${csv_content}" | grep -v 'redhat-user-workloads' | sort -u | wc -l)
+    if [[ ${missing_images} -gt 0 ]]; then
+      registry_ok=false
+    fi
+  fi
+  STEP_DETAILS="CSV PR merged=${state:-no}; staging registries=${registry_ok}; release-stage=${release_stage:-unknown}; staging-images-pending=${missing_images:-0}; staging render=${run_status:-missing} at $(ocr_abs_time "${run_created}"); catalog commits=${catalogs}"
   [[ -n "${state}" && "${registry_ok}" == true && -n "${run_url}" && ${catalogs} -gt 0 ]] || return "${OCR_RC_BLOCKED}"
   STEP_LINKS="operator [#${state}]($(jq -r '.[0].url' <<<"${csv}")), [render-olm-catalog](${run_url})"
 }

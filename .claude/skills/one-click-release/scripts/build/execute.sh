@@ -347,32 +347,48 @@ execute_2_10() {
     --state open --limit 1 --json number --jq '.[0].number // empty')
   if [[ -n "${pr}" ]]; then
     diff=$(gh pr diff --repo openshift-pipelines/operator "${pr}")
-    if grep -E '^\+.*image:.*(quay\.io|devel)' <<<"${diff}" >/dev/null; then
+    if grep -E '^\+.*image:.*(quay\.io|devel)' <<<"${diff}" | grep -vE 'quay\.io/redhat-user-workloads' >/dev/null; then
       gh pr close --repo openshift-pipelines/operator "${pr}" --comment 'Closing devel output before the staging dispatch.'
       pr=''
     fi
   fi
-  # Find the most recent commit on the release branch that modified the OLM catalog
-  local catalog_sha
-  catalog_sha=$(gh api "repos/openshift-pipelines/operator/commits?sha=${RELEASE_BRANCH}&path=.konflux/olm-catalog&per_page=1" --jq '.[0].sha // empty' 2>/dev/null)
+  # Look up a merged staging CSV PR by its well-known branch name first
+  merged_pr=$(gh pr list --repo openshift-pipelines/operator --head "actions/update/operator-update-images-${RELEASE_BRANCH}" \
+    --state merged --limit 1 --json number --jq '.[0].number // empty')
 
-  if [[ -n "${catalog_sha}" ]]; then
-    merged_pr=$(gh api "repos/openshift-pipelines/operator/commits/${catalog_sha}/pulls" \
-      --jq '[.[] | select(.merged_at != null)][0].number // empty' 2>/dev/null)
-  fi
-
-  # Fallback to old method if commits API returned nothing
+  # Fallback: find the most recent commit that modified the OLM catalog,
+  # but only accept PRs whose branch matches operator-update-images
   if [[ -z "${merged_pr}" ]]; then
-    merged_pr=$(gh pr list --repo openshift-pipelines/operator --head "actions/update/operator-update-images-${RELEASE_BRANCH}" \
-      --state merged --limit 1 --json number --jq '.[0].number // empty')
+    local catalog_sha
+    catalog_sha=$(gh api "repos/openshift-pipelines/operator/commits?sha=${RELEASE_BRANCH}&path=.konflux/olm-catalog&per_page=1" --jq '.[0].sha // empty' 2>/dev/null)
+    if [[ -n "${catalog_sha}" ]]; then
+      merged_pr=$(gh api "repos/openshift-pipelines/operator/commits/${catalog_sha}/pulls" \
+        --jq '[.[] | select(.merged_at != null) | select(.head.ref | test("operator-update-images"))][0].number // empty' 2>/dev/null)
+    fi
   fi
   if [[ -n "${merged_pr}" ]]; then
     diff=$(gh pr diff --repo openshift-pipelines/operator "${merged_pr}") || {
       printf 'Unable to inspect merged staging CSV PR; refusing to continue.\n' >&2
       return 2
     }
-    if grep -E '^\+.*image:.*(quay\.io|devel)' <<<"${diff}" >/dev/null; then
+    if grep -E '^\+.*image:.*(quay\.io|devel)' <<<"${diff}" | grep -vE 'quay\.io/redhat-user-workloads' >/dev/null; then
       merged_pr=''
+    fi
+  fi
+  # Pre-check: count images in the CSV still pointing at quay.io (not
+  # redhat-user-workloads).  These are operand images that haven't been
+  # transitioned to the staging registry yet.  We warn but still proceed
+  # because operator-update-images handles the actual rewriting.
+  local csv_content pending_images
+  csv_content=$(gh api "repos/openshift-pipelines/operator/contents/.konflux/olm-catalog/bundle/manifests/openshift-pipelines-operator-rh.clusterserviceversion.yaml?ref=${RELEASE_BRANCH}" \
+    --jq '.content' 2>/dev/null | base64 -d 2>/dev/null)
+  if [[ -n "${csv_content}" ]]; then
+    pending_images=$(grep -oE 'quay\.io/openshift-pipeline/[^ "]+' <<<"${csv_content}" | grep -v 'redhat-user-workloads' | sort -u | wc -l)
+    if [[ ${pending_images} -gt 0 ]]; then
+      printf 'WARNING: %d image(s) in the CSV still reference quay.io/openshift-pipeline/ (not yet in staging registry).\n' "${pending_images}" >&2
+      grep -oE 'quay\.io/openshift-pipeline/[^ "]+' <<<"${csv_content}" | grep -v 'redhat-user-workloads' | sort -u | while read -r img; do
+        printf '  → %s\n' "${img}" >&2
+      done
     fi
   fi
   if [[ -z "${pr}" && -z "${merged_pr}" ]]; then
@@ -391,7 +407,7 @@ execute_2_10() {
   fi
   if [[ -n "${pr}" ]]; then
     diff=$(gh pr diff --repo openshift-pipelines/operator "${pr}")
-    if grep -E '^\+.*image:.*(quay\.io|devel)' <<<"${diff}" >/dev/null; then
+    if grep -E '^\+.*image:.*(quay\.io|devel)' <<<"${diff}" | grep -vE 'quay\.io/redhat-user-workloads' >/dev/null; then
       printf 'CSV PR contains non-staging image references; refusing to merge.\n' >&2
       return 2
     fi
