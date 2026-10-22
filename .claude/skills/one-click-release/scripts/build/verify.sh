@@ -275,8 +275,44 @@ verify_2_11() {
     # Pin the verified bundle snapshot so verify_2_12/execute_2_13 use the same one
     printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${bundle}-snapshot"
   else
-    stale+=" bundle"
-    bundle_status="GENERATED GAP/STALE"
+    # Fallback: compare the bundle snapshot's containerImage digest against
+    # bundle.yaml and catalog-template.json at HEAD on the operator branch.
+    # Downstream nudge PRs move HEAD forward without changing bundle content,
+    # so the revision check is too strict in that case.
+    local snap_image snap_digest bundle_yaml_content catalog_content
+    local bundle_digest_match=false catalog_digest_match=false
+    snap_image=$(ocr_oc_get snapshot "${snapshot}" -o json 2>/dev/null \
+      | jq -r '.spec.components[0].containerImage // empty')
+    snap_digest=${snap_image##*@}
+    if [[ -n "${snap_digest}" && "${snap_digest}" == sha256:* ]]; then
+      # Check bundle.yaml at HEAD — line 4 contains the bundle image reference
+      bundle_yaml_content=$(gh api "repos/openshift-pipelines/operator/contents/bundle.yaml?ref=${RELEASE_BRANCH}" \
+        --jq '.content' 2>/dev/null | base64 -d 2>/dev/null)
+      if [[ -n "${bundle_yaml_content}" ]] && grep -qF "${snap_digest}" <<<"${bundle_yaml_content}"; then
+        bundle_digest_match=true
+      fi
+      # Check one catalog-template.json at HEAD for the same digest
+      local catalog_dirs catalog_dir
+      catalog_dirs=$(gh api "repos/openshift-pipelines/operator/contents/.konflux/olm-catalog/index?ref=${RELEASE_BRANCH}" \
+        --jq '[.[].name] | sort | last // empty' 2>/dev/null)
+      if [[ -n "${catalog_dirs}" ]]; then
+        catalog_content=$(gh api "repos/openshift-pipelines/operator/contents/.konflux/olm-catalog/index/${catalog_dirs}/catalog-template.json?ref=${RELEASE_BRANCH}" \
+          --jq '.content' 2>/dev/null | base64 -d 2>/dev/null)
+        if [[ -n "${catalog_content}" ]] && grep -qF "${snap_digest}" <<<"${catalog_content}"; then
+          catalog_digest_match=true
+        fi
+      fi
+      if [[ "${bundle_digest_match}" == true && "${catalog_digest_match}" == true ]]; then
+        bundle_status="CURRENT"
+        printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${bundle}-snapshot"
+      else
+        stale+=" bundle"
+        bundle_status="GENERATED GAP/STALE"
+      fi
+    else
+      stale+=" bundle"
+      bundle_status="GENERATED GAP/STALE"
+    fi
   fi
   printf '%s\t%s\t%s\t%s\n' "${bundle}" "${snapshot}" "${rev}" "${bundle_status}" \
     >>"${REPORT_BASE}/.state/fbc-snapshot-comparison.tsv"
