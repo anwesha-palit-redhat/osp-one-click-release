@@ -354,7 +354,12 @@ verify_1_8b() {
     # Classify upstream branch pattern and resolve expected version
     if [[ -z "${branch}" ]]; then
       # Component not in hack config; fall back to current version series
-      if [[ -n "${current}" && "${current}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      if [[ -z "${current}" ]]; then
+        # Component not present in this release (absent from both hack
+        # config and version.json) — skip rather than flag UNKNOWN.
+        printf '%s\t%s\t%s\t%s\t%s\n' "${component}" "—" "n/a" "n/a" "SKIP" >>"${REPORT_BASE}/.state/opc-version-comparison.tsv"
+        continue
+      elif [[ "${current}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         series=${current%.*}
         latest=$(latest_in_series "${repo}" "${series}")
       else
