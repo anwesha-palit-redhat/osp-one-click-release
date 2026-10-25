@@ -23,7 +23,7 @@ ocr_describe_action() {
     2.5) printf 'Verify snapshot digests match project.yaml.\n' ;;
     2.6) printf 'Trigger rebuild commits for repositories stale in the core snapshot.\n' ;;
     2.7) printf 'Process nudge PRs, including conflict consolidation when required.\n' ;;
-    2.8) printf 'Gate: re-verify snapshot and digest checks both pass.\n' ;;
+    2.8) printf 'Gate: re-verify snapshot and digests, then prompt for bundle snapshot and compare digests against core.\n' ;;
     2.9) printf 'Create the core stage Release CR from the latest verified snapshot.\n' ;;
     2.10) printf 'Run staging operator-update-images, merge its verified PR, and render the staging catalog.\n' ;;
     2.11) printf 'Trigger bundle and index rebuilds for stale FBC snapshots.\n' ;;
@@ -614,8 +614,23 @@ execute_2_2() {
 }
 
 execute_2_8() {
-  printf 'Gate check failed. Fix the underlying issue in the failing step.\n'
-  return 2
+  ocr_require_konflux || return 2
+  local bundle_snapshot
+  printf 'Enter the bundle snapshot name to verify against the core snapshot:\n'
+  printf '(e.g. openshift-pipelines-bundle-%s-YYYYMMDD-HHMMSS-000)\n' "${MM_DASHED}"
+  read -rp '> ' bundle_snapshot
+  [[ -n "${bundle_snapshot}" ]] || {
+    printf 'No bundle snapshot provided.\n' >&2
+    return 2
+  }
+  # Validate the snapshot exists in Konflux
+  ocr_oc_get snapshot "${bundle_snapshot}" -o jsonpath='{.metadata.name}' >/dev/null 2>&1 || {
+    printf 'Snapshot %s not found in Konflux.\n' "${bundle_snapshot}" >&2
+    return 2
+  }
+  # Save the user-provided bundle snapshot
+  printf '%s\n' "${bundle_snapshot}" >"${REPORT_BASE}/.state/user-bundle-snapshot"
+  printf 'Bundle snapshot pinned: %s\n' "${bundle_snapshot}"
 }
 
 ocr_execute_step() {

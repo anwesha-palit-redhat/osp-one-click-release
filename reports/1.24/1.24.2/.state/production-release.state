@@ -1,0 +1,5 @@
+VERSION=1.24.2
+STAGE=production-release
+BLOCKING_STEP=''
+BLOCKING_DETAILS=''
+REPORT_FILE=/Users/apalit/Work/osp-one-click-release/reports/1.24/1.24.2/release/report_2026-10-27_16-32-36_IST.md

@@ -61,6 +61,106 @@ ocr_create_release_manifest() {
   fi
 }
 
+compare_bundle_core_digests() {
+  # Compare all OSP image digests between a bundle snapshot's CSV relatedImages
+  # and the core snapshot components. Returns 0 if all match, 1 if mismatches found.
+  # Usage: compare_bundle_core_digests <bundle_snapshot> <core_snapshot>
+  local bundle_snapshot=$1 core_snapshot=$2
+  local bundle_image core_json csv_dir result
+
+  bundle_image=$(ocr_oc_get snapshot "${bundle_snapshot}" \
+    -o jsonpath='{.spec.components[0].containerImage}' 2>/dev/null) || return 1
+  [[ -n "${bundle_image}" ]] || return 1
+
+  core_json=$(ocr_oc_get snapshot "${core_snapshot}" \
+    -o jsonpath='{.spec.components}' 2>/dev/null) || return 1
+  [[ -n "${core_json}" ]] || return 1
+
+  csv_dir=$(mktemp -d)
+  oc image extract "${bundle_image}" \
+    --path "/manifests/openshift-pipelines-operator-rh.clusterserviceversion.yaml:${csv_dir}/" \
+    --confirm 2>/dev/null || {
+    rm -rf "${csv_dir}"
+    return 1
+  }
+
+  result=$(python3 - "${core_json}" "${csv_dir}/openshift-pipelines-operator-rh.clusterserviceversion.yaml" <<'PY'
+import json, sys, re
+
+core_components = json.loads(sys.argv[1])
+csv_path = sys.argv[2]
+
+# Build core digest map: digest -> component name
+core_map = {}
+for c in core_components:
+    img = c.get("containerImage", "")
+    if "@sha256:" in img:
+        digest = img.split("@sha256:")[1]
+        core_map[digest] = c["name"]
+
+# Parse relatedImages from CSV
+with open(csv_path) as f:
+    lines = f.readlines()
+
+start = None
+for i, line in enumerate(lines):
+    if line.strip() == "relatedImages:":
+        start = i + 1
+        break
+
+entries = []
+current = {}
+if start:
+    for i in range(start, len(lines)):
+        stripped = lines[i].strip()
+        if not stripped.startswith("-") and not stripped.startswith("name:") \
+                and not stripped.startswith("image:") and stripped \
+                and not lines[i].startswith("    "):
+            break
+        if stripped.startswith("- image:"):
+            if current: entries.append(current)
+            current = {"image": stripped[len("- image:"):].strip()}
+        elif stripped.startswith("image:"):
+            current["image"] = stripped[len("image:"):].strip()
+        elif stripped.startswith("name:"):
+            current["name"] = stripped[len("name:"):].strip()
+        elif stripped.startswith("- name:"):
+            if current: entries.append(current)
+            current = {"name": stripped[len("- name:"):].strip()}
+    if current: entries.append(current)
+
+# Deduplicate by digest
+bundle_by_digest = {}
+for e in entries:
+    img = e.get("image", "")
+    name = e.get("name", "UNKNOWN")
+    if "@sha256:" in img:
+        digest = img.split("@sha256:")[1]
+        if digest not in bundle_by_digest:
+            bundle_by_digest[digest] = {"name": name, "image": img}
+
+matched = 0
+mismatched = []
+for digest, info in sorted(bundle_by_digest.items(), key=lambda x: x[1]["name"]):
+    is_osp = "openshift-pipelines/" in info["image"]
+    if digest in core_map:
+        matched += 1
+    elif is_osp:
+        mismatched.append(f"  {info['name']}: bundle={digest[:16]}... (not in core)")
+
+print(f"matched={matched} mismatched={len(mismatched)}")
+for line in mismatched:
+    print(line)
+# Exit code: 0 if no mismatches, 1 otherwise
+sys.exit(0 if len(mismatched) == 0 else 1)
+PY
+  )
+  local rc=$?
+  rm -rf "${csv_dir}"
+  printf '%s\n' "${result}"
+  return "${rc}"
+}
+
 execute_code_unfreeze() {
   local temp branch pr open_url branch_rc
   temp=$(mktemp -d)

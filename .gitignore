@@ -2,4 +2,4 @@
 .env
 
 # Generated release reports, resumable state, and manifests.
-reports/
+#reports/

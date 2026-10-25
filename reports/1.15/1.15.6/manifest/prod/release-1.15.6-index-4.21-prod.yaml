@@ -1,0 +1,10 @@
+apiVersion: appstudio.redhat.com/v1alpha1
+kind: Release
+metadata:
+  labels:
+    appstudio.openshift.io/application: openshift-pipelines-index-4-21-1-15
+  generateName: openshift-pipelines-index-4-21-1-15-prod-rp-
+  namespace: tekton-ecosystem-tenant
+spec:
+  releasePlan: openshift-pipelines-index-4-21-1-15-prod-rp
+  snapshot: openshift-pipelines-index-4-21-1-15-20261026-135530-000

@@ -44,7 +44,9 @@ STAGES (in execution order)
 OPTIONS
   --stage STAGE   Target a specific stage (required for execute; optional for verify)
   --step  STEP    Target a single step within a stage (requires --stage)
-  --skip  STEPS   Comma-separated steps to skip, e.g. --skip 1.5 or --skip 1.5,1.6
+  --skip  STEPS   Comma-separated steps or stages to skip, e.g. --skip 1.5,1.6
+                  Stage names (config, build, image-copy, production-release)
+                  skip all steps in that stage, e.g. --skip config,build
   --through STAGE Run through all stages up to and including STAGE (run only)
   --wait  SECS    Polling interval in run mode — default 300 (5 minutes)
   --force         Re-execute a step that already verifies as DONE (execute only)

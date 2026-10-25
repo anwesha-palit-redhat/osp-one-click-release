@@ -29,7 +29,7 @@ ocr_step_title() {
     2.5) printf '%s' 'Digest verification' ;;
     2.6) printf '%s' 'Wait for core snapshot' ;;
     2.7) printf '%s' 'Process nudge PRs' ;;
-    2.8) printf '%s' 'Gate: snapshot + digests' ;;
+    2.8) printf '%s' 'Gate: snapshot + digests + bundle-core match' ;;
     2.9) printf '%s' 'Core stage release' ;;
     2.10) printf '%s' 'OLM catalog render' ;;
     2.11) printf '%s' 'Wait for FBC build' ;;
@@ -269,6 +269,17 @@ verify_2_11() {
     STEP_DETAILS='bundle snapshot not found'
     return "${OCR_RC_BLOCKED}"
   }
+
+  # Re-verify: if user pinned a bundle snapshot at step 2.8, ensure current latest matches
+  local bundle_snap_file="${REPORT_BASE}/.state/user-bundle-snapshot"
+  if [[ -f "${bundle_snap_file}" ]]; then
+    local pinned_snap
+    pinned_snap=$(<"${bundle_snap_file}")
+    if [[ "${snapshot}" != "${pinned_snap}" ]]; then
+      STEP_DETAILS="bundle snapshot changed since step 2.8: verified=${pinned_snap}, current=${snapshot}; re-run execute 2.8 to re-verify"
+      return "${OCR_RC_BLOCKED}"
+    fi
+  fi
   rev=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.spec.components[0].source.git.revision}' 2>/dev/null)
   if ocr_operator_revision_is_generated "${rev}" "${operator_head}"; then
     bundle_status="CURRENT"
@@ -351,6 +362,30 @@ verify_2_12() {
     STEP_DETAILS='core stage release has not succeeded; bundle cannot be released until core is complete'
     return "${OCR_RC_BLOCKED}"
   fi
+
+  # Re-verify bundle-core digest match before releasing the bundle
+  local bundle_snap_file="${REPORT_BASE}/.state/user-bundle-snapshot"
+  if [[ -f "${bundle_snap_file}" ]]; then
+    local pinned_snap core_app core_snap bundle_app current_snap compare_out
+    pinned_snap=$(<"${bundle_snap_file}")
+    bundle_app=$(find_app bundle)
+    current_snap=$(ocr_latest_snapshot "${bundle_app}")
+    if [[ "${current_snap}" != "${pinned_snap}" ]]; then
+      STEP_DETAILS="bundle snapshot changed since step 2.8: verified=${pinned_snap}, current=${current_snap}; re-run execute 2.8 to re-verify"
+      return "${OCR_RC_BLOCKED}"
+    fi
+    core_app=$(find_app core)
+    if [[ -f "${REPORT_BASE}/.state/stage-${core_app}-snapshot" ]]; then
+      core_snap=$(<"${REPORT_BASE}/.state/stage-${core_app}-snapshot")
+    else
+      core_snap=$(ocr_latest_snapshot "${core_app}")
+    fi
+    compare_out=$(compare_bundle_core_digests "${pinned_snap}" "${core_snap}" 2>&1) || {
+      STEP_DETAILS="bundle-core digest mismatch at step 2.12; ${compare_out}; re-run execute 2.8"
+      return "${OCR_RC_BLOCKED}"
+    }
+  fi
+
   verify_release_kind bundle stage || return $?
   verify_rp_version_tag bundle
 }
@@ -581,7 +616,28 @@ verify_2_8() {
     STEP_DETAILS="gate failed: $(IFS=', '; echo "${failed[*]}")"
     return "${OCR_RC_BLOCKED}"
   fi
-  STEP_DETAILS="snapshot and digest checks both passed"
+
+  # Bundle-core digest comparison gate
+  local bundle_snap_file="${REPORT_BASE}/.state/user-bundle-snapshot"
+  if [[ -f "${bundle_snap_file}" ]]; then
+    local user_bundle_snap core_app core_snap compare_out
+    user_bundle_snap=$(<"${bundle_snap_file}")
+    core_app=$(find_app core)
+    if [[ -f "${REPORT_BASE}/.state/stage-${core_app}-snapshot" ]]; then
+      core_snap=$(<"${REPORT_BASE}/.state/stage-${core_app}-snapshot")
+    else
+      core_snap=$(ocr_latest_snapshot "${core_app}")
+    fi
+    printf 'Comparing bundle snapshot %s against core snapshot %s\n' "${user_bundle_snap}" "${core_snap}"
+    compare_out=$(compare_bundle_core_digests "${user_bundle_snap}" "${core_snap}" 2>&1) || {
+      STEP_DETAILS="bundle-core digest mismatch; ${compare_out}"
+      return "${OCR_RC_BLOCKED}"
+    }
+    STEP_DETAILS="snapshot and digest checks passed; bundle-core digests verified (${compare_out})"
+  else
+    STEP_DETAILS="snapshot and digest checks passed; bundle snapshot not yet provided — run execute 2.8 to set it"
+    return "${OCR_RC_BLOCKED}"
+  fi
 }
 
 ocr_verify_step() {

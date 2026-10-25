@@ -18,10 +18,21 @@ ocr_describe_action() {
     4.2) printf 'Create the core production Release CR using the succeeded stage core snapshot.\n' ;;
     4.3) printf 'Dispatch operator-update-images with environment=production.\n' ;;
     4.4) printf 'Validate and merge the production CSV PR.\n' ;;
-    4.5) printf 'Trigger a production bundle rebuild.\n' ;;
+    4.5) printf 'Prompt for prod bundle snapshot, verify digests against core, then trigger a production bundle rebuild.\n' ;;
     4.6) printf 'Create the bundle production Release CR.\n' ;;
     4.7) printf 'Wait for devel renders, dispatch the production catalog render, validate and merge its exact generated PR, then verify or trigger production index snapshots.\n' ;;
-    4.8) printf 'Create all index production Release CRs.\n' ;;
+    4.8)
+      printf 'Create all index production Release CRs.\n'
+      printf '\nIndex snapshots to be released:\n'
+      local _app _snap
+      for _app in "${REPORT_BASE}/.state"/prod-4.7-openshift-pipelines-index-*-snapshot; do
+        [[ -f "${_app}" ]] || continue
+        _snap=$(<"${_app}")
+        _app=$(basename "${_app}" | sed 's/^prod-4\.7-//;s/-snapshot$//')
+        printf '  %s  →  %s\n' "${_app}" "${_snap}"
+      done
+      printf '\n'
+      ;;
     4.9) printf 'Create the CDN production Release CR using the succeeded core production snapshot.\n' ;;
     4.10) printf 'Wait for the bundle image to appear on registry.redhat.io after the CDN pipeline completes.\n' ;;
     4.11) printf 'List downstream repos and revisions from the core snapshot for release tagging.\n' ;;
@@ -94,7 +105,19 @@ create_prod_release() {
     printf 'No production release plan for %s.\n' "${app}" >&2
     return 2
   }
+  # Check for any existing release for this snapshot (exact release plan match)
   existing=$(existing_release_for_snapshot "${rp}" "${snapshot}")
+  # Also check for releases with the same snapshot under any prod plan for this kind
+  # (catches releases created with a slightly different plan name)
+  if [[ -z "${existing}" ]]; then
+    existing=$(ocr_oc_get releases -o json 2>/dev/null | jq -r --arg mm "${MM_DASHED}" --arg kind "${kind}" --arg snapshot "${snapshot}" '
+      [.items[] | select(.spec.snapshot==$snapshot and (.spec.releasePlan | contains($mm) and contains($kind) and contains("prod")))
+        | {name:.metadata.name,status:([.status.conditions[]? | select(.type=="Released")][0].status // "Unknown"),
+           reason:([.status.conditions[]? | select(.type=="Released")][0].reason // "Unknown"),
+           created:(.metadata.creationTimestamp // "")}]
+        | sort_by(.created) | .[-1]
+        | if . == null then empty else "\(.name)|\(.status)|\(.reason)" end')
+  fi
   if [[ -n "${existing}" ]]; then
     existing_name=${existing%%|*}
     existing_status=${existing#*|}
@@ -116,8 +139,6 @@ create_prod_release() {
   path="${REPORT_BASE}/manifest/prod/release-${VERSION}-${kind}-prod.yaml"
   ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
   ocr_create_release_manifest "${path}" || return 2
-  # Pin snapshot only after successful release creation to avoid stale snapshots on retry
-  printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/prod-${app}-snapshot"
 }
 
 execute_4_1() {
@@ -148,9 +169,9 @@ execute_4_2() {
   if [[ -n "${1:-}" ]]; then
     user_snapshot=$1
   else
-    printf 'Stored stage core snapshot: %s\n' "${snapshot}"
-    printf 'Please enter the stage-core-snapshot to proceed with production release: '
-    read -r user_snapshot
+    printf 'Stored stage core snapshot: %s\n' "${snapshot}" >&2
+    printf 'Please enter the stage-core-snapshot to proceed with production release: ' >&2
+    read -r user_snapshot </dev/tty
   fi
   [[ "${user_snapshot}" == "${snapshot}" ]] || {
     printf 'Snapshot mismatch: user provided '\''%s'\'' but stored stage core snapshot is '\''%s'\''\n' "${user_snapshot}" "${snapshot}" >&2
@@ -264,7 +285,25 @@ execute_4_4() {
   gh pr merge "${url}" -d -r --auto
 }
 
-execute_4_5() { push_operator_placeholder .konflux/olm-catalog/bundle/.placeholder 'One Click Release: rebuild bundle for production'; }
+execute_4_5() {
+  ocr_require_konflux || return 2
+  local bundle_snapshot
+  printf 'Enter the production bundle snapshot name to verify against the core snapshot:\n'
+  printf '(e.g. openshift-pipelines-bundle-%s-YYYYMMDD-HHMMSS-000)\n' "${MM_DASHED}"
+  read -rp '> ' bundle_snapshot
+  if [[ -n "${bundle_snapshot}" ]]; then
+    # Validate the snapshot exists in Konflux
+    ocr_oc_get snapshot "${bundle_snapshot}" -o jsonpath='{.metadata.name}' >/dev/null 2>&1 || {
+      printf 'Snapshot %s not found in Konflux.\n' "${bundle_snapshot}" >&2
+      return 2
+    }
+    printf '%s\n' "${bundle_snapshot}" >"${REPORT_BASE}/.state/user-prod-bundle-snapshot"
+    printf 'Production bundle snapshot pinned: %s\n' "${bundle_snapshot}"
+  else
+    printf 'No bundle snapshot provided; triggering rebuild.\n'
+  fi
+  push_operator_placeholder .konflux/olm-catalog/bundle/.placeholder 'One Click Release: rebuild bundle for production'
+}
 
 execute_4_6() {
   ocr_require_konflux || return 2
@@ -276,8 +315,8 @@ execute_4_6() {
   }
   bundle_app=$(find_app bundle)
   # Use the pinned production bundle snapshot (from verify_4_5)
-  if [[ -f "${REPORT_BASE}/.state/prod-${bundle_app}-snapshot" ]]; then
-    bundle_snapshot=$(<"${REPORT_BASE}/.state/prod-${bundle_app}-snapshot")
+  if [[ -f "${REPORT_BASE}/.state/prod-4.5-${bundle_app}-snapshot" ]]; then
+    bundle_snapshot=$(<"${REPORT_BASE}/.state/prod-4.5-${bundle_app}-snapshot")
   else
     bundle_snapshot=$(ocr_latest_snapshot "${bundle_app}")
   fi
@@ -296,6 +335,38 @@ execute_4_7() {
   local apps app snapshot rev snapshot_created stale=false found=0 run status conclusion
   local state_file number recorded_head recorded_commit_at pr url diff pr_state head_oid merged_at merge_sha ancestry release_stage stage_rc commit
   state_file="${REPORT_BASE}/.state/production-catalog-pr"
+
+  # If the index rebuild placeholder was already pushed, skip the render/PR
+  # workflow and go straight to checking whether index snapshots have caught up.
+  if ocr_mutation_done production-index-placeholder && [[ -s "${state_file}" ]]; then
+    IFS='|' read -r number recorded_head recorded_commit_at <"${state_file}"
+    pr=$(gh pr view --repo openshift-pipelines/operator "${number}" \
+      --json state,mergedAt,mergeCommit) || return 2
+    merged_at=$(jq -r '.mergedAt // empty' <<<"${pr}")
+    merge_sha=$(jq -r '.mergeCommit.oid // empty' <<<"${pr}")
+    if [[ -n "${merged_at}" && -n "${merge_sha}" ]]; then
+      # Jump to the index snapshot check below
+      apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
+      while IFS= read -r app; do
+        snapshot=$(ocr_latest_snapshot "${app}")
+        [[ -n "${snapshot}" ]] || { stale=true; continue; }
+        ((found += 1))
+        rev=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.spec.components[0].source.git.revision}')
+        snapshot_created=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.metadata.creationTimestamp}')
+        ancestry=$(gh api "repos/openshift-pipelines/operator/compare/${merge_sha}...${rev}" --jq '.status' 2>/dev/null) || ancestry=unknown
+        if ocr_operator_release_stage_at "${rev}"; then release_stage=production; else release_stage=unknown; fi
+        [[ ("${ancestry}" == ahead || "${ancestry}" == identical) && "${release_stage}" == production && "${snapshot_created}" > "${merged_at}" ]] || stale=true
+      done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("index") and contains($mm)) | .metadata.name' <<<"${apps}")
+      ((found > 0)) || stale=true
+      if [[ "${stale}" == true ]]; then
+        printf 'Production index rebuild was already pushed; waiting for current push snapshots to appear.\n'
+        printf 'Re-run this step once the index builds complete in Konflux.\n'
+        return 2
+      fi
+      return 0
+    fi
+  fi
+
   if ! ocr_workflow_provenance_matches production-render render-olm-catalog.yaml production "${RELEASE_BRANCH}"; then
     rm -f "${state_file}"
   fi
@@ -325,6 +396,65 @@ execute_4_7() {
     pr=$(jq 'sort_by(.updatedAt) | last // empty' <<<"${pr}")
     number=$(jq -r '.number // empty' <<<"${pr}")
     recorded_head=$(jq -r '.headRefOid // empty' <<<"${pr}")
+    if [[ -z "${number}" || -z "${recorded_head}" ]]; then
+      # Render workflow succeeded but produced no catalog PR (no changes needed).
+      # The catalog was likely already rendered by a prior step. Ask the user to
+      # confirm that push builds are ready before proceeding to index snapshot checks.
+      printf '\nRender workflow completed with no changes (no catalog PR created).\n' >&2
+      printf 'This typically means the catalog was already rendered by a prior merge.\n\n' >&2
+      printf 'Current latest push index snapshots:\n' >&2
+      local idx_app idx_snap idx_created
+      apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
+      while IFS= read -r idx_app; do
+        idx_snap=$(ocr_latest_snapshot "${idx_app}")
+        if [[ -n "${idx_snap}" ]]; then
+          idx_created=$(ocr_oc_get snapshot "${idx_snap}" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)
+          printf '  %s  →  %s  (%s)\n' "${idx_app}" "${idx_snap}" "$(ocr_abs_time "${idx_created}")" >&2
+        else
+          printf '  %s  →  (no push snapshot found)\n' "${idx_app}" >&2
+        fi
+      done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
+      printf '\nAre the on-push index builds ready? Type "yes" to proceed to snapshot check: ' >&2
+      local user_confirm
+      read -r user_confirm
+      if [[ "${user_confirm}" != "yes" ]]; then
+        printf 'Aborting; re-run when index builds are complete.\n' >&2
+        return 2
+      fi
+      # Use the production CSV merge SHA as the reference point for snapshot checks
+      if [[ -f "${REPORT_BASE}/.state/production-csv-merge-sha" ]]; then
+        merge_sha=$(<"${REPORT_BASE}/.state/production-csv-merge-sha")
+        merged_at=$(gh api "repos/openshift-pipelines/operator/commits/${merge_sha}" --jq '.commit.committer.date' 2>/dev/null) || merged_at=''
+      fi
+      [[ -n "${merge_sha}" && -n "${merged_at}" ]] || {
+        printf 'Cannot determine production CSV merge provenance for snapshot validation.\n' >&2
+        return 2
+      }
+      # Skip the PR validation and jump straight to index snapshot checks
+      apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
+      while IFS= read -r app; do
+        snapshot=$(ocr_latest_snapshot "${app}")
+        [[ -n "${snapshot}" ]] || { stale=true; continue; }
+        ((found += 1))
+        rev=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.spec.components[0].source.git.revision}')
+        snapshot_created=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.metadata.creationTimestamp}')
+        ancestry=$(gh api "repos/openshift-pipelines/operator/compare/${merge_sha}...${rev}" --jq '.status' 2>/dev/null) || ancestry=unknown
+        if ocr_operator_release_stage_at "${rev}"; then release_stage=production; else release_stage=unknown; fi
+        [[ ("${ancestry}" == ahead || "${ancestry}" == identical) && "${release_stage}" == production && "${snapshot_created}" > "${merged_at}" ]] || stale=true
+      done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("index") and contains($mm)) | .metadata.name' <<<"${apps}")
+      ((found > 0)) || stale=true
+      if [[ "${stale}" == true ]]; then
+        if ocr_mutation_done production-index-placeholder; then
+          printf 'Production index rebuild was already pushed; waiting for current push snapshots to appear.\n'
+          printf 'Re-run this step once the index builds complete in Konflux.\n'
+        else
+          push_operator_placeholder .konflux/olm-catalog/index/.placeholder 'One Click Release: rebuild index images for production'
+          ocr_mark_mutation production-index-placeholder
+        fi
+        return 2
+      fi
+      return 0
+    fi
     commit=$(gh api "repos/openshift-pipelines/operator/commits/${recorded_head}" 2>/dev/null) || return 2
     recorded_commit_at=$(jq -r '.commit.committer.date // empty' <<<"${commit}")
     jq -e '.author.login=="openshift-pipelines-bot" or .author.login=="github-actions[bot]" or .author.login=="red-hat-konflux[bot]"' <<<"${commit}" >/dev/null || return 2
@@ -404,18 +534,20 @@ execute_4_7() {
   ((found > 0)) || stale=true
   if [[ "${stale}" == true ]]; then
     if ocr_mutation_done production-index-placeholder; then
-      printf 'Production index rebuild was already pushed; waiting for its snapshot instead of repeating it.\n'
-      return 2
+      printf 'Production index rebuild was already pushed; waiting for current push snapshots to appear.\n'
+      printf 'Re-run this step once the index builds complete in Konflux.\n'
+    else
+      push_operator_placeholder .konflux/olm-catalog/index/.placeholder 'One Click Release: rebuild index images for production'
+      ocr_mark_mutation production-index-placeholder
     fi
-    push_operator_placeholder .konflux/olm-catalog/index/.placeholder 'One Click Release: rebuild index images for production'
-    ocr_mark_mutation production-index-placeholder
+    return 2
   fi
 }
 
 create_index_prod_release() {
   local app=$1 snapshot rp ocp path existing existing_name existing_status existing_reason
-  if [[ -f "${REPORT_BASE}/.state/prod-${app}-snapshot" ]]; then
-    snapshot=$(<"${REPORT_BASE}/.state/prod-${app}-snapshot")
+  if [[ -f "${REPORT_BASE}/.state/prod-4.7-${app}-snapshot" ]]; then
+    snapshot=$(<"${REPORT_BASE}/.state/prod-4.7-${app}-snapshot")
   else
     snapshot=$(ocr_latest_snapshot "${app}")
   fi
@@ -451,7 +583,6 @@ create_index_prod_release() {
   path="${REPORT_BASE}/manifest/prod/release-${VERSION}-index-${ocp}-prod.yaml"
   ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
   ocr_create_release_manifest "${path}" || return 2
-  printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/prod-${app}-snapshot"
 }
 
 execute_4_8() {
@@ -469,6 +600,18 @@ execute_4_8() {
     printf 'No index applications found.\n' >&2
     return 2
   }
+  printf '\nIndex snapshots to be released:\n' >&2
+  local snap_display
+  for app in "${index_apps[@]}"; do
+    [[ -n "${app}" ]] || continue
+    if [[ -f "${REPORT_BASE}/.state/prod-4.7-${app}-snapshot" ]]; then
+      snap_display=$(<"${REPORT_BASE}/.state/prod-4.7-${app}-snapshot")
+    else
+      snap_display=$(ocr_latest_snapshot "${app}")
+    fi
+    printf '  %s  →  %s\n' "${app}" "${snap_display:-MISSING}" >&2
+  done
+  printf '\n' >&2
   for app in "${index_apps[@]}"; do
     [[ -n "${app}" ]] || continue
     apps_list+=("${app}")
@@ -496,7 +639,7 @@ execute_4_9() {
     return 2
   }
   app="openshift-pipelines-core-${MM_DASHED}"
-  rp="openshift-pipelines-${MM_DASHED}-core-cdn-prod"
+  rp="openshift-pipelines-${MM_DASHED}-core-cdn-prod-rp"
   existing=$(existing_release_for_snapshot "${rp}" "${snapshot}")
   if [[ -n "${existing}" ]]; then
     existing_name=${existing%%|*}
@@ -576,7 +719,7 @@ execute_4_12() {
       continue
     fi
     printf 'Pushing tag %s to %s at %s...\n' "${RELEASE_TAG}" "${repo}" "${rev:0:12}"
-    if git push "https://github.com/${repo}.git" "${rev}:refs/tags/${RELEASE_TAG}" 2>/dev/null; then
+    if gh api "repos/${repo}/git/refs" -f "ref=refs/tags/${RELEASE_TAG}" -f "sha=${rev}" --silent; then
       printf 'Tagged %s\n' "${repo}"
       ((tagged += 1))
     else

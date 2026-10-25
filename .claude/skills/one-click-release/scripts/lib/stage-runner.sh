@@ -1,10 +1,25 @@
 #!/usr/bin/env bash
 
+ocr_stage_step_prefix() {
+  # Map stage name to its step number prefix
+  case "$1" in
+    config)              printf '1.' ;;
+    build)               printf '2.' ;;
+    image-copy)          printf '3.' ;;
+    production-release)  printf '4.' ;;
+    *)                   printf '' ;;
+  esac
+}
+
 ocr_step_is_skipped() {
-  local step=$1 skip
+  local step=$1 skip prefix
   local IFS=','
   for skip in ${OCR_SKIP_STEPS:-}; do
+    # Exact step match (e.g. "2.5")
     [[ "${skip}" == "${step}" ]] && return 0
+    # Stage name match (e.g. "build" skips all 2.* steps)
+    prefix=$(ocr_stage_step_prefix "${skip}")
+    [[ -n "${prefix}" && "${step}" == "${prefix}"* ]] && return 0
   done
   return 1
 }
@@ -127,17 +142,7 @@ ocr_run_through_stage() {
 
   for step in "${steps[@]}"; do
     # Check if step should be skipped (respects --skip / OCR_SKIP_STEPS).
-    skip_match=false
-    if [[ -n "${OCR_SKIP_STEPS:-}" ]]; then
-      local _ifs_save="${IFS}"
-      IFS=','
-      for skip in ${OCR_SKIP_STEPS}; do
-        [[ "${skip}" == "${step}" ]] && skip_match=true
-      done
-      IFS="${_ifs_save}"
-    fi
-
-    if [[ "${skip_match}" == true ]]; then
+    if ocr_step_is_skipped "${step}"; then
       printf '  %s[%s]%s %sSKIPPED%s %s(by --skip)%s\n' \
         "${OCR_DIM}" "${step}" "${OCR_RESET}" \
         "${OCR_YELLOW}" "${OCR_RESET}" "${OCR_DIM}" "${OCR_RESET}"

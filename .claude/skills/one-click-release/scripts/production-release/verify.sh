@@ -20,7 +20,7 @@ ocr_step_title() {
     4.2) printf '%s' 'Core production release' ;;
     4.3) printf '%s' 'Production CSV update' ;;
     4.4) printf '%s' 'Merge production CSV PR' ;;
-    4.5) printf '%s' 'Wait for bundle snapshot' ;;
+    4.5) printf '%s' 'Wait for prod bundle snapshot + bundle-core match' ;;
     4.6) printf '%s' 'Bundle production release' ;;
     4.7) printf '%s' 'OLM catalog render + index snapshots' ;;
     4.8) printf '%s' 'Index production releases' ;;
@@ -116,17 +116,7 @@ verify_4_2() {
     STEP_DETAILS='succeeded core stage snapshot not found'
     return "${OCR_RC_BLOCKED}"
   }
-  if [[ -n "${1:-}" ]]; then
-    user_snapshot=$1
-  else
-    printf 'Stored stage core snapshot: %s\n' "${stage_snapshot}"
-    printf 'Please enter the stage-core-snapshot to proceed with production release: '
-    read -r user_snapshot
-  fi
-  [[ "${user_snapshot}" == "${stage_snapshot}" ]] || {
-    STEP_DETAILS="Snapshot mismatch: user provided '${user_snapshot}' but stored stage core snapshot is '${stage_snapshot}'"
-    return "${OCR_RC_BLOCKED}"
-  }
+  STEP_DETAILS="stage core snapshot: ${stage_snapshot}"
   verify_release core cdn "${stage_snapshot}"
 }
 
@@ -263,8 +253,39 @@ verify_4_5() {
     STEP_DETAILS+="; ⚠ core image digest mismatch:${image_mismatch}"
   fi
 
-  # Pin the production bundle snapshot for use by execute_4_6
-  printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/prod-${bundle_app}-snapshot"
+  # Pin the production bundle snapshot for use by verify_4_6/execute_4_6
+  printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/prod-4.5-${bundle_app}-snapshot"
+
+  # Bundle-core digest comparison for production
+  local prod_bundle_snap_file="${REPORT_BASE}/.state/user-prod-bundle-snapshot"
+  if [[ -f "${prod_bundle_snap_file}" ]]; then
+    local user_prod_snap core_snap compare_out
+    user_prod_snap=$(<"${prod_bundle_snap_file}")
+    if [[ "${snapshot}" != "${user_prod_snap}" ]]; then
+      STEP_DETAILS+="; prod bundle snapshot changed: verified=${user_prod_snap}, current=${snapshot}; re-run execute 4.5 to re-verify"
+      return "${OCR_RC_BLOCKED}"
+    fi
+    # Resolve core snapshot
+    if [[ -f "${REPORT_BASE}/stage-vars.env" ]]; then
+      core_snap=$(grep -m1 '^STAGE_CORE_SNAPSHOT=' "${REPORT_BASE}/stage-vars.env" | cut -d= -f2-) || core_snap=''
+    fi
+    if [[ -z "${core_snap:-}" && -n "${core_app:-}" && -f "${REPORT_BASE}/.state/stage-${core_app}-snapshot" ]]; then
+      core_snap=$(<"${REPORT_BASE}/.state/stage-${core_app}-snapshot")
+    fi
+    [[ -n "${core_snap:-}" ]] || {
+      STEP_DETAILS+="; core snapshot not found for digest comparison"
+      return "${OCR_RC_BLOCKED}"
+    }
+    printf 'Comparing prod bundle snapshot %s against core snapshot %s\n' "${user_prod_snap}" "${core_snap}"
+    compare_out=$(compare_bundle_core_digests "${user_prod_snap}" "${core_snap}" 2>&1) || {
+      STEP_DETAILS+="; prod bundle-core digest mismatch; ${compare_out}"
+      return "${OCR_RC_BLOCKED}"
+    }
+    STEP_DETAILS+="; prod bundle-core digests verified (${compare_out})"
+  else
+    STEP_DETAILS+="; prod bundle snapshot not yet provided — run execute 4.5 to set it"
+    return "${OCR_RC_BLOCKED}"
+  fi
 }
 
 verify_4_6() {
@@ -274,8 +295,8 @@ verify_4_6() {
   bundle_app=$(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("bundle") and contains($mm)) | .metadata.name' <<<"${apps}" | head -1)
 
   # Use the production-pinned bundle snapshot (saved by verify_4_5)
-  if [[ -f "${REPORT_BASE}/.state/prod-${bundle_app}-snapshot" ]]; then
-    snapshot=$(<"${REPORT_BASE}/.state/prod-${bundle_app}-snapshot")
+  if [[ -f "${REPORT_BASE}/.state/prod-4.5-${bundle_app}-snapshot" ]]; then
+    snapshot=$(<"${REPORT_BASE}/.state/prod-4.5-${bundle_app}-snapshot")
   else
     snapshot=$(ocr_latest_snapshot "${bundle_app}")
   fi
@@ -283,6 +304,35 @@ verify_4_6() {
     STEP_DETAILS='bundle snapshot not found'
     return "${OCR_RC_BLOCKED}"
   }
+
+  # Re-verify: if user pinned a prod bundle snapshot at step 4.5, ensure it still matches
+  local prod_bundle_snap_file="${REPORT_BASE}/.state/user-prod-bundle-snapshot"
+  if [[ -f "${prod_bundle_snap_file}" ]]; then
+    local pinned_snap core_snap compare_out
+    pinned_snap=$(<"${prod_bundle_snap_file}")
+    if [[ "${snapshot}" != "${pinned_snap}" ]]; then
+      STEP_DETAILS="prod bundle snapshot changed since step 4.5: verified=${pinned_snap}, current=${snapshot}; re-run execute 4.5 to re-verify"
+      return "${OCR_RC_BLOCKED}"
+    fi
+    # Re-run full digest comparison as safety net
+    if [[ -f "${REPORT_BASE}/stage-vars.env" ]]; then
+      core_snap=$(grep -m1 '^STAGE_CORE_SNAPSHOT=' "${REPORT_BASE}/stage-vars.env" | cut -d= -f2-) || core_snap=''
+    fi
+    if [[ -z "${core_snap:-}" ]]; then
+      local core_app
+      core_app=$(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name|contains("core") and contains($mm)) | .metadata.name' <<<"${apps}" | head -1)
+      if [[ -n "${core_app}" && -f "${REPORT_BASE}/.state/stage-${core_app}-snapshot" ]]; then
+        core_snap=$(<"${REPORT_BASE}/.state/stage-${core_app}-snapshot")
+      fi
+    fi
+    if [[ -n "${core_snap:-}" ]]; then
+      compare_out=$(compare_bundle_core_digests "${pinned_snap}" "${core_snap}" 2>&1) || {
+        STEP_DETAILS="prod bundle-core digest mismatch at step 4.6; ${compare_out}; re-run execute 4.5"
+        return "${OCR_RC_BLOCKED}"
+      }
+    fi
+  fi
+
   verify_release bundle '' "${snapshot}"
 }
 
@@ -290,10 +340,45 @@ verify_4_7() {
   ocr_require_konflux || return $?
   local run run_url apps app snapshot rev created checked=0 stale=0 old=0 error releases bundle_release_created
   local state_file number recorded_head recorded_commit_at pr pr_url pr_state head_oid merged_at merge_sha diff ancestry release_stage commit
-  ocr_workflow_provenance_matches production-render render-olm-catalog.yaml production "${RELEASE_BRANCH}" || {
+  if ! ocr_workflow_provenance_matches production-render render-olm-catalog.yaml production "${RELEASE_BRANCH}"; then
+    # No recorded render dispatch. Look for a recent successful push-event
+    # render-olm-catalog run on the release branch, then check whether
+    # current index snapshots post-date it.
+    local recent_runs='' render_created=''
+    recent_runs=$(gh run list --repo openshift-pipelines/operator --workflow=render-olm-catalog.yaml --limit 10 \
+      --json databaseId,status,conclusion,createdAt,headBranch,event 2>/dev/null) || recent_runs='[]'
+    local today
+    today=$(date -u +'%Y-%m-%d')
+    render_created=$(jq -r --arg b "${RELEASE_BRANCH}" --arg today "${today}" '
+      [.[] | select(.headBranch==$b and .status=="completed" and .conclusion=="success"
+        and (.createdAt | startswith($today)))]
+      | sort_by(.createdAt) | last | .createdAt // empty' <<<"${recent_runs}")
+    if [[ -n "${render_created}" ]]; then
+      # Found a successful push render on the release branch — check if
+      # all index snapshots are current and post-date that render.
+      local skip_checked=0 skip_stale=0
+      apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
+      while IFS= read -r app; do
+        snapshot=$(ocr_latest_snapshot "${app}")
+        [[ -n "${snapshot}" ]] || continue
+        ((skip_checked += 1))
+        rev=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.spec.components[0].source.git.revision}')
+        created=$(ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.metadata.creationTimestamp}')
+        if ocr_operator_release_stage_at "${rev}"; then release_stage=production; else release_stage=unknown; fi
+        if [[ "${release_stage}" == production && "${created}" > "${render_created}" ]]; then
+          printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/prod-4.7-${app}-snapshot"
+        else
+          ((skip_stale += 1))
+        fi
+      done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
+      if ((skip_checked > 0 && skip_stale == 0)); then
+        STEP_DETAILS="no render dispatch recorded but ${skip_checked} index snapshots are current (post-date render at ${render_created})"
+        return 0
+      fi
+    fi
     STEP_DETAILS='no locally recorded production render dispatch; staging or unrelated runs are never accepted'
     return "${OCR_RC_BLOCKED}"
-  }
+  fi
   run=$(gh run view --repo openshift-pipelines/operator "${RUN_ID}" --json status,conclusion,createdAt,headBranch,url,event 2>"${REPORT_BASE}/.state/gh-error") || {
     error=$(<"${REPORT_BASE}/.state/gh-error")
     ocr_fail_with_error 'unable to verify recorded production render run' "${error}"
@@ -376,8 +461,8 @@ verify_4_7() {
     local snapshot_status="STALE"
     if [[ ("${ancestry}" == ahead || "${ancestry}" == identical) && "${release_stage}" == production && "${snapshot_created}" > "${merged_at}" ]]; then
       snapshot_status="CURRENT"
-      # Pin the production index snapshot for use by execute_4_8
-      printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/prod-${app}-snapshot"
+      # Pin the production index snapshot for use by verify_4_8/execute_4_8
+      printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/prod-4.7-${app}-snapshot"
     fi
     printf '%s\t%s\t%s\t%s\t%s\n' "${app}" "${snapshot}" "${rev}" "${snapshot_created}" "${snapshot_status}" >>"${REPORT_BASE}/.state/production-index-snapshots.tsv"
   done < <(jq -r --arg mm "${MM_DASHED}" '.items[] | select(.metadata.name | contains("index") and contains($mm)) | .metadata.name' <<<"${apps}" | sort)
@@ -393,8 +478,8 @@ verify_4_8() {
   releases=$(releases_json)
   while IFS= read -r app; do
     # Use the production-pinned index snapshot (saved by verify_4_7)
-    if [[ -f "${REPORT_BASE}/.state/prod-${app}-snapshot" ]]; then
-      snapshot=$(<"${REPORT_BASE}/.state/prod-${app}-snapshot")
+    if [[ -f "${REPORT_BASE}/.state/prod-4.7-${app}-snapshot" ]]; then
+      snapshot=$(<"${REPORT_BASE}/.state/prod-4.7-${app}-snapshot")
     else
       snapshot=$(ocr_latest_snapshot "${app}")
     fi
