@@ -12,6 +12,24 @@ source "${SCRIPTS_DIR}/lib/stage-runner.sh"
 STAGE_NAME='production-release'
 STAGE_STEPS=(4.1 4.2 4.3 4.4 4.5 4.6 4.7 4.8 4.9 4.10 4.11 4.12)
 
+ensure_release_author() {
+  if [[ -z "${RELEASE_AUTHOR:-}" ]]; then
+    printf 'Enter the release author (release.appstudio.openshift.io/author): ' >&2
+    read -r RELEASE_AUTHOR
+    [[ -n "${RELEASE_AUTHOR}" ]] || {
+      printf 'Release author is required.\n' >&2
+      return 2
+    }
+    export RELEASE_AUTHOR
+  fi
+}
+
+inject_release_author_label() {
+  local path=$1
+  [[ -n "${RELEASE_AUTHOR:-}" ]] || return 0
+  sed -i "/appstudio.openshift.io\/application:/a\\    release.appstudio.openshift.io/author: ${RELEASE_AUTHOR}" "${path}"
+}
+
 ocr_describe_action() {
   case "$1" in
     4.1) printf 'Stage releases are prerequisites; repair them in the build stage.\n' ;;
@@ -90,6 +108,7 @@ push_operator_placeholder() {
 
 create_prod_release() {
   local kind=$1 snapshot=${2:-} app rp path existing existing_name existing_status existing_reason
+  ensure_release_author || return 2
   app=$(find_app "${kind}")
   [[ -n "${app}" ]] || {
     printf '%s app not found.\n' "${kind}" >&2
@@ -138,6 +157,7 @@ create_prod_release() {
   fi
   path="${REPORT_BASE}/manifest/prod/release-${VERSION}-${kind}-prod.yaml"
   ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
+  inject_release_author_label "${path}"
   ocr_create_release_manifest "${path}" || return 2
 }
 
@@ -546,6 +566,7 @@ execute_4_7() {
 
 create_index_prod_release() {
   local app=$1 snapshot rp ocp path existing existing_name existing_status existing_reason
+  ensure_release_author || return 2
   if [[ -f "${REPORT_BASE}/.state/prod-4.7-${app}-snapshot" ]]; then
     snapshot=$(<"${REPORT_BASE}/.state/prod-4.7-${app}-snapshot")
   else
@@ -582,6 +603,7 @@ create_index_prod_release() {
   ocp=${ocp/-/.}
   path="${REPORT_BASE}/manifest/prod/release-${VERSION}-index-${ocp}-prod.yaml"
   ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
+  inject_release_author_label "${path}"
   ocr_create_release_manifest "${path}" || return 2
 }
 
@@ -632,6 +654,7 @@ execute_4_8() {
 
 execute_4_9() {
   ocr_require_konflux || return 2
+  ensure_release_author || return 2
   local snapshot path rp app release_name existing existing_name existing_status existing_reason
   snapshot=$(successful_snapshot core prod cdn)
   [[ -n "${snapshot}" ]] || {
@@ -663,6 +686,7 @@ execute_4_9() {
   {
     printf 'apiVersion: appstudio.redhat.com/v1alpha1\nkind: Release\nmetadata:\n'
     printf '  labels:\n    appstudio.openshift.io/application: %s\n' "${app}"
+    printf '    release.appstudio.openshift.io/author: %s\n' "${RELEASE_AUTHOR}"
     printf '  generateName: %s-release-\n  namespace: %s\n' "${rp}" "${KONFLUX_NS}"
     printf 'spec:\n  data:\n  gracePeriodDays: 10\n  releasePlan: %s\n  snapshot: %s\n' "${rp}" "${snapshot}"
   } >"${path}"
