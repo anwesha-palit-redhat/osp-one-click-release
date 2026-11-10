@@ -14,6 +14,24 @@ STAGE_STEPS=(2.1 2.2 2.3 2.4 2.5 2.6 2.7 2.8 2.9 2.10 2.11 2.12 2.13)
 # Steps that require human judgment and must not be auto-executed in run-through mode.
 STAGE_RUN_THROUGH_MANUAL_STEPS=(2.1 2.2 2.3)
 
+ensure_release_author() {
+  if [[ -z "${RELEASE_AUTHOR:-}" ]]; then
+    printf 'Enter the release author (release.appstudio.openshift.io/author): ' >&2
+    read -r RELEASE_AUTHOR
+    [[ -n "${RELEASE_AUTHOR}" ]] || {
+      printf 'Release author is required.\n' >&2
+      return 2
+    }
+    export RELEASE_AUTHOR
+  fi
+}
+
+inject_release_author_label() {
+  local path=$1
+  [[ -n "${RELEASE_AUTHOR:-}" ]] || return 0
+  sed -i "/appstudio.openshift.io\/application:/a\\    release.appstudio.openshift.io/author: ${RELEASE_AUTHOR}" "${path}"
+}
+
 ocr_describe_action() {
   case "$1" in
     2.1) printf 'Ensure code freeze is not active before starting the build.\n' ;;
@@ -180,6 +198,7 @@ existing_release_for_snapshot() {
 
 create_stage_release() {
   local kind=$1 app snapshot="" rp path
+  ensure_release_author || return 2
   app=$(find_app "${kind}")
   [[ -n "${app}" ]] || {
     printf '%s application not found.\n' "${kind}" >&2
@@ -222,6 +241,7 @@ create_stage_release() {
   fi
   path="${REPORT_BASE}/manifest/stage/release-${VERSION}-${kind}-stage.yaml"
   ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
+  inject_release_author_label "${path}"
   ocr_create_release_manifest "${path}" || return 2
   # Pin snapshot only after successful release creation to avoid stale snapshots on retry
   printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${app}-snapshot"
@@ -471,6 +491,7 @@ execute_2_12() {
 
 create_index_stage_release() {
   local app=$1 snapshot rp ocp path existing existing_name existing_status existing_reason
+  ensure_release_author || return 2
   if [[ -f "${REPORT_BASE}/.state/stage-${app}-snapshot" ]]; then
     snapshot=$(<"${REPORT_BASE}/.state/stage-${app}-snapshot")
   else
@@ -507,6 +528,7 @@ create_index_stage_release() {
   ocp=${ocp/-/.}
   path="${REPORT_BASE}/manifest/stage/release-${VERSION}-index-${ocp}-stage.yaml"
   ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
+  inject_release_author_label "${path}"
   ocr_create_release_manifest "${path}" || return 2
   printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${app}-snapshot"
 }
