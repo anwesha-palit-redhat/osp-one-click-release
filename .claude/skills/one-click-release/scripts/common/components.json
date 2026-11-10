@@ -1,0 +1,150 @@
+{
+  "1.23": {
+    "p12n-console-plugin-pf5": {
+      "upstream": "openshift-pipelines/console-plugin",
+      "branch": "release-v1.22.x"
+    },
+    "p12n-console-plugin": {
+      "upstream": "openshift-pipelines/console-plugin",
+      "branch": "release-v1.23.x"
+    },
+    "tektoncd-git-clone": {
+      "upstream": "tektoncd-catalog/git-clone",
+      "branch": "main"
+    },
+    "p12n-manual-approval-gate": {
+      "upstream": "openshift-pipelines/manual-approval-gate",
+      "branch": "release-v0.9.0"
+    },
+    "p12n-multicluster-proxy-aae": {
+      "upstream": "openshift-pipelines/multicluster-proxy-aae",
+      "branch": "release-v0.1.x"
+    },
+    "p12n-opc": {
+      "upstream": "openshift-pipelines/opc",
+      "branch": "release-v1.23.x"
+    },
+    "operator": {
+      "upstream": "tektoncd/operator",
+      "branch": "release-v0.80.x"
+    },
+    "pac-downstream": {
+      "upstream": "tektoncd/pipelines-as-code",
+      "branch": "release-v0.48.x"
+    },
+    "p12n-syncer-service": {
+      "upstream": "openshift-pipelines/syncer-service",
+      "branch": "release-v0.1.x"
+    },
+    "tekton-assist": {
+      "upstream": "TODO",
+      "branch": "TODO"
+    },
+    "p12n-tekton-caches": {
+      "upstream": "openshift-pipelines/tekton-caches",
+      "branch": "release-v0.3.x"
+    },
+    "tektoncd-chains": {
+      "upstream": "tektoncd/chains",
+      "branch": "release-v0.27.x"
+    },
+    "tektoncd-cli": {
+      "upstream": "tektoncd/cli",
+      "branch": "release-v0.45.x"
+    },
+    "tektoncd-hub": {
+      "upstream": "openshift-pipelines/hub",
+      "branch": "release-v1.24.2"
+    },
+    "tektoncd-pipeline": {
+      "upstream": "tektoncd/pipeline",
+      "branch": "release-v1.12.x"
+    },
+    "tektoncd-pruner": {
+      "upstream": "tektoncd/pruner",
+      "branch": "release-v0.4.x"
+    },
+    "tektoncd-results": {
+      "upstream": "tektoncd/results",
+      "branch": "release-v0.19.x"
+    },
+    "tektoncd-triggers": {
+      "upstream": "tektoncd/triggers",
+      "branch": "release-v0.36.x"
+    },
+    "tekton-kueue": {
+      "upstream": "tektoncd/tekton-kueue",
+      "branch": "release-v0.3.x"
+    }
+  },
+  "1.24": {
+    "p12n-console-plugin-pf5": {
+      "upstream": "openshift-pipelines/console-plugin",
+      "branch": "release-v1.22.x"
+    },
+    "p12n-console-plugin": {
+      "upstream": "openshift-pipelines/console-plugin",
+      "branch": "release-v1.24.x"
+    },
+    "tektoncd-git-clone": {
+      "upstream": "tektoncd-catalog/git-clone",
+      "branch": "main"
+    },
+    "p12n-manual-approval-gate": {
+      "upstream": "openshift-pipelines/manual-approval-gate",
+      "branch": "release-v0.9.1"
+    },
+    "p12n-multicluster-proxy-aae": {
+      "upstream": "openshift-pipelines/multicluster-proxy-aae",
+      "branch": "release-v0.1.x"
+    },
+    "p12n-opc": {
+      "upstream": "openshift-pipelines/opc",
+      "branch": "release-v1.24.x"
+    },
+    "operator": {
+      "upstream": "tektoncd/operator",
+      "branch": "release-v0.81.x"
+    },
+    "pac-downstream": {
+      "upstream": "tektoncd/pipelines-as-code",
+      "branch": "release-v0.50.x"
+    },
+    "p12n-syncer-service": {
+      "upstream": "openshift-pipelines/syncer-service",
+      "branch": "release-v0.1.x"
+    },
+    "p12n-tekton-caches": {
+      "upstream": "openshift-pipelines/tekton-caches",
+      "branch": "release-v0.4.x"
+    },
+    "tektoncd-chains": {
+      "upstream": "tektoncd/chains",
+      "branch": "release-v0.29.x"
+    },
+    "tektoncd-cli": {
+      "upstream": "tektoncd/cli",
+      "branch": "release-v0.46.x"
+    },
+    "tektoncd-pipeline": {
+      "upstream": "tektoncd/pipeline",
+      "branch": "release-v1.15.x"
+    },
+    "tektoncd-pruner": {
+      "upstream": "tektoncd/pruner",
+      "branch": "release-v0.4.x"
+    },
+    "tektoncd-results": {
+      "upstream": "tektoncd/results",
+      "branch": "release-v0.20.x"
+    },
+    "tektoncd-triggers": {
+      "upstream": "tektoncd/triggers",
+      "branch": "release-v0.37.x"
+    },
+    "tekton-kueue": {
+      "upstream": "tektoncd/tekton-kueue",
+      "branch": "release-v0.4.x"
+    }
+  }
+}

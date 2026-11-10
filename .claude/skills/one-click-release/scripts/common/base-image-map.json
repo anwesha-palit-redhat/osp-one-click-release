@@ -1,0 +1,19 @@
+{
+    "common":{
+        "GO_BUILDER": "registry.access.redhat.com/ubi9/go-toolset",
+        "UBI_RUNTIME": "registry.access.redhat.com/ubi9/ubi-minimal"
+    },
+    "p12n-console-plugin": {
+        "BUILDER": "registry.access.redhat.com/ubi9/nodejs-22",
+        "NGX_RUNTIME": "registry.access.redhat.com/ubi9/nginx-124"
+    },
+    "p12n-console-plugin-pf5": {
+        "BUILDER": "registry.access.redhat.com/ubi9/nodejs-22",
+        "NGX_RUNTIME": "registry.access.redhat.com/ubi9/nginx-124"
+    },
+    "tektoncd-pipeline":{
+        "GO_BUILDER": "registry.access.redhat.com/ubi9/go-toolset",
+        "UBI_RUNTIME": "registry.access.redhat.com/ubi9/ubi-minimal",
+        "FIPS_BUILDER": "registry.access.redhat.com/ubi9/ubi-minimal"
+    }
+}
