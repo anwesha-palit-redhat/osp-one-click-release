@@ -36,10 +36,6 @@
       "upstream": "openshift-pipelines/syncer-service",
       "branch": "release-v0.1.x"
     },
-    "tekton-assist": {
-      "upstream": "TODO",
-      "branch": "TODO"
-    },
     "p12n-tekton-caches": {
       "upstream": "openshift-pipelines/tekton-caches",
       "branch": "release-v0.3.x"

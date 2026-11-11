@@ -11,7 +11,9 @@
 # Uses the same component list, release branch, minor image map, and catalog
 # digests as verify.sh. For each downstream repository it checks out
 # release-v<minor>.x, updates mapped ARG defaults under .konflux/dockerfiles,
-# and opens a pull request. Existing pull requests are not merged.
+# and opens a pull request labeled lgtm, approved, and automated. An existing
+# base-image-update/<minor> branch is force-pushed so its open pull request
+# receives the new digests. Pull requests are not merged.
 #
 # Interactive runs must type: update base images <minor>
 # Non-interactive runs must pass --yes.
@@ -46,9 +48,9 @@ OPTIONS
                      without asking. Digest-only updates always proceed.
 
 GITHUB_USER and GITHUB_EMAIL are required. Pull requests target
-release-v<minor>.x and are not merged. A branch that already exists and is
-not a fast-forward of the release branch is left in place; the new commit is
-pushed to a timestamped branch instead.
+release-v<minor>.x, are labeled lgtm, approved, and automated, and are not
+merged. When base-image-update/<minor> already exists and cannot be
+fast-forwarded, that branch is force-pushed and the open pull request is reused.
 EOF
 }
 
@@ -145,6 +147,16 @@ biu_unexpected_paths() {
   return 1
 }
 
+biu_add_pr_labels() {
+  local repo=$1 url=$2 log rc=0
+  log=$(gh pr edit --repo "${repo}" "${url}" --add-label lgtm,approved,automated 2>&1) || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    printf 'WARNING: could not add labels lgtm, approved, automated to %s\n%s\n' \
+      "${url}" "$(ocr_redact "${log}")" >&2
+    return 1
+  fi
+}
+
 biu_publish() {
   local component=$1 dest=$2
   local full="${BIU_ORG}/${component}"
@@ -206,11 +218,9 @@ biu_publish() {
   rc=0
   log=$(git -C "${dest}" push --set-upstream origin "HEAD:${branch}" 2>&1) || rc=$?
   if [[ ${rc} -ne 0 ]] && grep -Eqi 'non-fast-forward|fetch first|\[rejected\]' <<<"${log}"; then
-    pushed_branch="${branch}-$(date +%Y%m%d%H%M%S)"
-    git -C "${dest}" branch -m "${pushed_branch}"
-    detail="Pushed ${pushed_branch} because ${branch} already existed and was not a fast-forward."
+    detail="Force-pushed ${branch} because it already existed and was not a fast-forward."
     rc=0
-    log=$(git -C "${dest}" push --set-upstream origin "HEAD:${pushed_branch}" 2>&1) || rc=$?
+    log=$(git -C "${dest}" push --force --set-upstream origin "HEAD:${branch}" 2>&1) || rc=$?
   fi
   if [[ ${rc} -ne 0 ]]; then
     log=$(ocr_redact "${log}")
@@ -222,6 +232,9 @@ biu_publish() {
   url=$(gh pr list --repo "${full}" --base "${RELEASE_BRANCH}" --head "${pushed_branch}" \
     --state open --json url --jq '.[0].url // empty')
   if [[ -n "${url}" ]]; then
+    if ! biu_add_pr_labels "${full}" "${url}"; then
+      detail="${detail:+${detail} }Could not add labels lgtm, approved, automated."
+    fi
     biu_result "${component}" "PR UPDATED" "${url}" "${detail}"
     return 0
   fi
@@ -237,7 +250,7 @@ biu_publish() {
     --out "${body_file}"
   rc=0
   url=$(gh pr create --repo "${full}" --base "${RELEASE_BRANCH}" --head "${pushed_branch}" \
-    --title "${title}" --body-file "${body_file}" 2>"${err_file}") || rc=$?
+    --title "${title}" --body-file "${body_file}" --label lgtm,approved,automated 2>"${err_file}") || rc=$?
   url=${url//$'\r'/}
   url=${url//$'\n'/}
   if [[ ${rc} -ne 0 || -z "${url}" ]]; then
