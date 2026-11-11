@@ -106,6 +106,12 @@ assert_eq '1-21' "${MM_DASHED}" 'version parsing derives MM_DASHED'
 assert_eq 'release-v1.21.x' "${RELEASE_BRANCH}" 'version parsing derives release branch'
 assert_eq 'true' "${IS_PATCH}" 'version parsing identifies patch release'
 assert_eq 'production-release' "$(ocr_normalize_stage release)" 'stage aliases normalize predictably'
+assert_eq 'base-image-update' "$(ocr_normalize_stage base-image-update)" 'base image stage name is accepted'
+assert_eq 'base-image-update' "$(ocr_normalize_stage base_image_update)" 'base image stage alias normalizes'
+assert_eq '64' "$(run_rc "${SCRIPTS_DIR}/one-click-release.sh" verify 1.23.5 --stage base-image-update --step 1)" 'base image verify rejects step selection'
+assert_eq '64' "$(run_rc "${SCRIPTS_DIR}/one-click-release.sh" run 1.23.5 --through base-image-update)" 'base image stage is excluded from run-through'
+assert_eq '1' "$(run_rc "${SCRIPTS_DIR}/one-click-release.sh" verify 9.9.9 --stage base-image-update)" 'base image verify dispatches into the stage script'
+if grep -q 'No components for minor 9.9' /tmp/ocr-test.err; then pass 'base image verify reaches component lookup'; else fail 'base image verify reaches component lookup'; fi
 assert_eq '64' "$(run_rc "${SCRIPTS_DIR}/one-click-release.sh" verify 1.21)" 'invalid versions fail with usage exit'
 
 manifest="${REPORT_BASE}/manifest/stage/release-${VERSION}-core-stage.yaml"
@@ -123,7 +129,7 @@ else
 fi
 
 mutating='gh[[:space:]]+workflow[[:space:]]+run|gh[[:space:]]+pr[[:space:]]+(merge|edit|review|close|comment)|git[[:space:]]+push|oc[[:space:]]+create|kubectl[[:space:]]+apply|skopeo[[:space:]]+copy'
-if grep -ERn "${mutating}" "${SCRIPTS_DIR}"/{config,build,image-copy,production-release}/verify.sh >/tmp/ocr-test.out; then
+if grep -ERn "${mutating}" "${SCRIPTS_DIR}"/{config,build,image-copy,production-release,base-image-update}/verify.sh >/tmp/ocr-test.out; then
   fail 'verify scripts contain no mutating commands'
 else
   pass 'verify scripts contain no mutating commands'

@@ -15,6 +15,7 @@ COMMANDS
              Check the current state of a release without making any changes.
              Without --stage, verifies config, build, and image-copy in order.
              --stage is required when --step is given.
+             base-image-update is opt-in and is not part of the default order.
 
   execute  VERSION --stage STAGE [--step STEP] [--skip STEPS] [--force]
              Execute the next blocked step in the given stage (or the step
@@ -40,6 +41,10 @@ STAGES (in execution order)
   build              Steps 2.1–2.14  Snapshot verification, stage releases
   image-copy         Steps 3.1–3.2   Copy IIB index images to quay.io
   production-release Steps 4.1–4.10  Production releases + image publication
+
+OPTIONAL STAGE
+  base-image-update              Compare or update Konflux base image digests.
+                                 Not part of verify-all or run. No --step/--skip.
 
 OPTIONS
   --stage STAGE   Target a specific stage (required for execute; optional for verify)
@@ -72,6 +77,12 @@ EXAMPLES
 
   # Production release (always interactive — never via run)
   one-click-release.sh execute 1.23.3 --stage production-release
+
+  # Compare base image digests for a minor release
+  one-click-release.sh verify 1.23.5 --stage base-image-update
+
+  # Update those digests. An image-name mismatch prompts before it is rewritten.
+  one-click-release.sh execute 1.23.5 --stage base-image-update
 
   # Lift code freeze after a build cycle
   one-click-release.sh unfreeze 1.23
@@ -125,6 +136,10 @@ case "${command}" in
       printf '%s\n' '--stage is required when --step is given.' >&2
       exit 64
     fi
+    if [[ "${stage}" == base-image-update && ( -n "${step}" || -n "${skip}" ) ]]; then
+      printf '%s\n' 'base-image-update does not take --step or --skip.' >&2
+      exit 64
+    fi
     [[ -z "${step}" ]] || export OCR_VERIFY_STEP="${step}"
     [[ -z "${skip}" ]] || export OCR_SKIP_STEPS="${skip}"
     if [[ -n "${stage}" ]]; then
@@ -173,9 +188,17 @@ case "${command}" in
       printf '%s\n' '--stage is required for execute.' >&2
       exit 64
     }
-    [[ -z "${skip}" ]] || export OCR_SKIP_STEPS="${skip}"
-    [[ "${force}" == false ]] || export OCR_FORCE=1
-    "$(stage_script "${stage}" execute)" "${version}" "${step}"
+    if [[ "${stage}" == base-image-update ]]; then
+      if [[ -n "${step}" || -n "${skip}" || "${force}" == true ]]; then
+        printf '%s\n' 'base-image-update does not take --step, --skip, or --force.' >&2
+        exit 64
+      fi
+      "$(stage_script "${stage}" execute)" "${version}"
+    else
+      [[ -z "${skip}" ]] || export OCR_SKIP_STEPS="${skip}"
+      [[ "${force}" == false ]] || export OCR_FORCE=1
+      "$(stage_script "${stage}" execute)" "${version}" "${step}"
+    fi
     ;;
   run)
     version=${2:-}
@@ -210,6 +233,10 @@ case "${command}" in
     }
     [[ "${through}" != production-release ]] || {
       printf '%s\n' 'run --through production-release is not allowed. Use: execute --stage production-release' >&2
+      exit 64
+    }
+    [[ "${through}" != base-image-update ]] || {
+      printf '%s\n' 'run --through base-image-update is not allowed. Use: verify --stage base-image-update or execute --stage base-image-update' >&2
       exit 64
     }
     [[ -z "${skip}" ]] || export OCR_SKIP_STEPS="${skip}"

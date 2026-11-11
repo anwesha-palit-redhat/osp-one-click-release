@@ -436,8 +436,9 @@ ocr_normalize_stage() {
     build) printf '%s\n' build ;;
     image-copy | image_copy) printf '%s\n' image-copy ;;
     production-release | production_release | release) printf '%s\n' production-release ;;
+    base-image-update | base_image_update | base-image) printf '%s\n' base-image-update ;;
     *)
-      printf 'Unknown stage %q. Expected config, build, image-copy, or production-release.\n' "${1:-}" >&2
+      printf 'Unknown stage %q. Expected config, build, image-copy, production-release, or base-image-update.\n' "${1:-}" >&2
       return 1
       ;;
   esac
