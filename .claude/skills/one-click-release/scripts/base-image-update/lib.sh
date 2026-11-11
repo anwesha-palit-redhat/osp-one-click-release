@@ -172,13 +172,14 @@ biu_load_components() {
 }
 
 biu_fetch_digests() {
-  python3 "${BIU_PY}" digests --map "${BIU_IMAGE_MAP}" --out "${BIU_DIGESTS}"
+  python3 "${BIU_PY}" digests --map "${BIU_IMAGE_MAP}" --minor "${MAJOR_MINOR}" --out "${BIU_DIGESTS}"
 }
 
 biu_record() {
   python3 "${BIU_PY}" record \
     --findings "${BIU_FINDINGS}" \
     --map "${BIU_IMAGE_MAP}" \
+    --minor "${MAJOR_MINOR}" \
     --org "${BIU_ORG}" \
     --component "$1" \
     --status "$2" \
@@ -248,6 +249,7 @@ biu_scan_checkout() {
   python3 "${BIU_PY}" "${mode}" \
     --findings "${BIU_FINDINGS}" \
     --map "${BIU_IMAGE_MAP}" \
+    --minor "${MAJOR_MINOR}" \
     --digests "${BIU_DIGESTS}" \
     --org "${BIU_ORG}" \
     --root "${dest}" \

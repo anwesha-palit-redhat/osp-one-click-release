@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Resolve and compare Konflux base-image digests.
 
-Image repositories come from scripts/common/base-image-map.json. A component
-that is a key in that file uses its own ARG map. Every other component uses
-the "common" map. Digests are the manifest-list digest of the "latest" tag
-from the Red Hat Ecosystem Catalog.
+Image repositories come from scripts/common/base-image-map.json. The file is
+keyed by minor release, then by component. A component that is a key in that
+minor's map uses its own ARG map. Every other component uses the "common" map.
+Digests are the manifest-list digest of the "latest" tag from the Red Hat
+Ecosystem Catalog.
 """
 
 from __future__ import annotations
@@ -56,21 +57,31 @@ def validate_image(image: object, source: str) -> str:
     return image
 
 
-def load_image_map(path: Path) -> OrderedDict[str, OrderedDict[str, str]]:
-    raw = load_json(path)
+def parse_profile_map(path: Path, raw: Mapping[str, object], minor: str) -> OrderedDict[str, OrderedDict[str, str]]:
     if "common" not in raw or not isinstance(raw["common"], dict) or not raw["common"]:
-        raise SystemExit(f"{path} must contain a non-empty 'common' ARG map")
+        raise SystemExit(f"{path} minor {minor} must contain a non-empty 'common' ARG map")
     image_map: OrderedDict[str, OrderedDict[str, str]] = OrderedDict()
     for profile, args in raw.items():
         if not isinstance(args, dict) or not args:
-            raise SystemExit(f"{path} profile {profile} must be a non-empty object")
+            raise SystemExit(f"{path} minor {minor} profile {profile} must be a non-empty object")
         mapped: OrderedDict[str, str] = OrderedDict()
         for arg, image in args.items():
             if not isinstance(arg, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", arg):
-                raise SystemExit(f"{path} profile {profile} has an invalid ARG name: {arg!r}")
-            mapped[arg] = validate_image(image, f"{path} {profile}.{arg}")
+                raise SystemExit(f"{path} minor {minor} profile {profile} has an invalid ARG name: {arg!r}")
+            mapped[arg] = validate_image(image, f"{path} {minor}.{profile}.{arg}")
         image_map[profile] = mapped
     return image_map
+
+
+def load_image_map(path: Path, minor: str) -> OrderedDict[str, OrderedDict[str, str]]:
+    if not re.fullmatch(r"[0-9]+\.[0-9]+", minor):
+        raise SystemExit(f"Invalid minor {minor!r}; expected X.Y")
+    raw = load_json(path)
+    selected = raw.get(minor)
+    if not isinstance(selected, dict) or not selected:
+        known = ", ".join(str(key) for key in raw) or "none"
+        raise SystemExit(f"No base image map for minor {minor} in {path}. Known minors: {known}")
+    return parse_profile_map(path, selected, minor)
 
 
 def profile_for(component: str, image_map: Mapping[str, Mapping[str, str]]) -> str:
@@ -596,7 +607,7 @@ def report_header(title: str, args: argparse.Namespace) -> list[str]:
             f"**Image map:** `{display_path(args.map, args.repo_root)}`  ",
             f"**Components:** `{display_path(args.components, args.repo_root)}`",
             "",
-            "A component that is a key in the image map uses that component's ARG list. "
+            "A component that is a key in this minor's image map uses that component's ARG list. "
             "Every other component uses `common`. The registry host and tag already written "
             "in a Dockerfile stay in place; the repository path follows the image map and "
             "the digest is the catalog manifest list.",
@@ -779,7 +790,7 @@ def pr_body(args: argparse.Namespace) -> str:
         for record in load_jsonl(Path(args.findings))
         if record.get("component") == args.component and record.get("type") == "arg" and record.get("updated")
     ]
-    profile = profile_for(args.component, load_image_map(Path(args.map)))
+    profile = profile_for(args.component, load_image_map(Path(args.map), args.minor))
     lines = [
         f"Update Konflux base image digests for `{args.branch}`.",
         "",
@@ -822,7 +833,7 @@ def command_list_components(args: argparse.Namespace) -> None:
 
 
 def command_digests(args: argparse.Namespace) -> None:
-    image_map = load_image_map(Path(args.map))
+    image_map = load_image_map(Path(args.map), args.minor)
     try:
         resolved = fetch_digests(image_map)
     except CatalogError as exc:
@@ -837,7 +848,7 @@ def command_digests(args: argparse.Namespace) -> None:
 
 
 def command_scan_or_apply(args: argparse.Namespace, apply: bool) -> None:
-    image_map = load_image_map(Path(args.map))
+    image_map = load_image_map(Path(args.map), args.minor)
     digest_payload = load_json(Path(args.digests))
     digests = {
         str(item["image"]): item
@@ -871,7 +882,7 @@ def load_digest_map(path: Path) -> dict[str, dict[str, str]]:
 
 
 def command_image_mismatches(args: argparse.Namespace) -> None:
-    image_map = load_image_map(Path(args.map))
+    image_map = load_image_map(Path(args.map), args.minor)
     digests = load_digest_map(Path(args.digests))
     profile = image_map[profile_for(args.component, image_map)]
     missing = [image for image in profile.values() if image not in digests]
@@ -909,7 +920,7 @@ def command_image_mismatches(args: argparse.Namespace) -> None:
 
 
 def command_record(args: argparse.Namespace) -> None:
-    image_map = load_image_map(Path(args.map))
+    image_map = load_image_map(Path(args.map), args.minor)
     detail = " | ".join(args.detail.splitlines()[:4])[:500]
     record = {
         **base_record(args.component, args.org, image_map),
@@ -1115,6 +1126,21 @@ def self_check() -> None:
         assert any(record.get("arg") == "UBI_RUNTIME" and record.get("updated") for record in common_records)
         assert "ubi-minimal:latest@" + new_ubi in (docker_dir / "controller.Dockerfile").read_text(encoding="utf-8")
         assert "ubi-minimal-pqc" not in (docker_dir / "controller.Dockerfile").read_text(encoding="utf-8")
+
+    map_path = Path(__file__).resolve().parents[1] / "common" / "base-image-map.json"
+    minor_123 = load_image_map(map_path, "1.23")
+    minor_124 = load_image_map(map_path, "1.24")
+    assert minor_123["common"]["UBI_RUNTIME"].endswith("/ubi9/ubi-minimal")
+    assert minor_124["common"]["UBI_RUNTIME"].endswith("/ubi9/ubi-minimal-pqc")
+    assert minor_124["tektoncd-hub"]["NODEJS_BUILDER"].endswith("/ubi9/nodejs-22")
+    assert profile_for("operator", minor_124) == "common"
+    assert profile_for("tektoncd-pipeline", minor_124) == "tektoncd-pipeline"
+    try:
+        load_image_map(map_path, "9.9")
+    except SystemExit as exc:
+        assert "9.9" in str(exc)
+    else:
+        raise AssertionError("a missing minor should be rejected")
     print("self-check ok", file=sys.stderr)
 
 
@@ -1129,6 +1155,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     digests_cmd = sub.add_parser("digests")
     digests_cmd.add_argument("--map", required=True)
+    digests_cmd.add_argument("--minor", required=True)
     digests_cmd.add_argument("--out", required=True)
     digests_cmd.set_defaults(func=command_digests)
 
@@ -1136,6 +1163,7 @@ def build_parser() -> argparse.ArgumentParser:
         scan_cmd = sub.add_parser(name)
         scan_cmd.add_argument("--findings", required=True)
         scan_cmd.add_argument("--map", required=True)
+        scan_cmd.add_argument("--minor", required=True)
         scan_cmd.add_argument("--digests", required=True)
         scan_cmd.add_argument("--org", default=ORG_DEFAULT)
         scan_cmd.add_argument("--root", required=True)
@@ -1146,6 +1174,7 @@ def build_parser() -> argparse.ArgumentParser:
     record_cmd = sub.add_parser("record")
     record_cmd.add_argument("--findings", required=True)
     record_cmd.add_argument("--map", required=True)
+    record_cmd.add_argument("--minor", required=True)
     record_cmd.add_argument("--org", default=ORG_DEFAULT)
     record_cmd.add_argument("--component", required=True)
     record_cmd.add_argument("--status", required=True)
@@ -1177,6 +1206,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     mismatch_cmd = sub.add_parser("image-mismatches")
     mismatch_cmd.add_argument("--map", required=True)
+    mismatch_cmd.add_argument("--minor", required=True)
     mismatch_cmd.add_argument("--digests", required=True)
     mismatch_cmd.add_argument("--org", default=ORG_DEFAULT)
     mismatch_cmd.add_argument("--root", required=True)
@@ -1191,6 +1221,7 @@ def build_parser() -> argparse.ArgumentParser:
     body_cmd = sub.add_parser("pr-body")
     body_cmd.add_argument("--findings", required=True)
     body_cmd.add_argument("--map", required=True)
+    body_cmd.add_argument("--minor", required=True)
     body_cmd.add_argument("--component", required=True)
     body_cmd.add_argument("--branch", required=True)
     body_cmd.add_argument("--out", required=True)

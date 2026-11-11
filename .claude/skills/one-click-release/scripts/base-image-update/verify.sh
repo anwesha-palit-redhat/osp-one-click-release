@@ -10,9 +10,9 @@
 #
 # Reads the minor's downstream components from scripts/common/components.json.
 # Checks out release-v<minor>.x in each openshift-pipelines repository and
-# compares ARG defaults under .konflux/dockerfiles with
-# scripts/common/base-image-map.json. A component key in the image map uses
-# that component's ARGs. Every other component uses the common ARGs.
+# compares ARG defaults under .konflux/dockerfiles with the matching minor
+# in scripts/common/base-image-map.json. A component key in that minor's map
+# uses that component's ARGs. Every other component uses the common ARGs.
 #
 # Digests are the manifest-list digest of the latest tag on
 # https://catalog.redhat.com/en. This command does not push or open pull requests.
@@ -34,8 +34,8 @@ verify.sh — compare Konflux base image digests with the Red Hat catalog
 USAGE
   verify.sh <X.Y|X.Y.Z> [--component NAME[,NAME...]]
 
-The version selects the minor release. 1.24 and 1.24.2 both use components
-for 1.24 and the downstream branch release-v1.24.x.
+The version selects the minor release. 1.24 and 1.24.2 both use the 1.24
+component list, the 1.24 base image map, and branch release-v1.24.x.
 
 OPTIONS
   --component NAME   Check one component, or a comma-separated list.

@@ -8,8 +8,8 @@
 #   execute.sh 1.24
 #   execute.sh 1.24 --component operator --yes
 #
-# Uses the same component list, release branch, image map, and catalog digests
-# as verify.sh. For each downstream repository it checks out
+# Uses the same component list, release branch, minor image map, and catalog
+# digests as verify.sh. For each downstream repository it checks out
 # release-v<minor>.x, updates mapped ARG defaults under .konflux/dockerfiles,
 # and opens a pull request. Existing pull requests are not merged.
 #
@@ -34,8 +34,8 @@ execute.sh — open pull requests that refresh Konflux base image digests
 USAGE
   execute.sh <X.Y|X.Y.Z> [--component NAME[,NAME...]] [--yes] [--rewrite-images]
 
-The version selects the minor release. 1.24 and 1.24.2 both use components
-for 1.24 and the downstream branch release-v1.24.x.
+The version selects the minor release. 1.24 and 1.24.2 both use the 1.24
+component list, the 1.24 base image map, and branch release-v1.24.x.
 
 OPTIONS
   --component NAME   Update one component, or a comma-separated list.
@@ -75,6 +75,7 @@ biu_collect_image_mismatches() {
   local component=$1 dest=$2 outfile=$3
   python3 "${BIU_PY}" image-mismatches \
     --map "${BIU_IMAGE_MAP}" \
+    --minor "${MAJOR_MINOR}" \
     --digests "${BIU_DIGESTS}" \
     --org "${BIU_ORG}" \
     --root "${dest}" \
@@ -230,6 +231,7 @@ biu_publish() {
   python3 "${BIU_PY}" pr-body \
     --findings "${BIU_FINDINGS}" \
     --map "${BIU_IMAGE_MAP}" \
+    --minor "${MAJOR_MINOR}" \
     --component "${component}" \
     --branch "${RELEASE_BRANCH}" \
     --out "${body_file}"
