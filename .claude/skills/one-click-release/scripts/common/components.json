@@ -71,6 +71,10 @@
     "tekton-kueue": {
       "upstream": "tektoncd/tekton-kueue",
       "branch": "release-v0.3.x"
+    },
+    "serve-tkn-cli": {
+      "upstream": "openshift-pipelines/serve-tkn-cli",
+      "branch": "release-v0.1.x"
     }
   },
   "1.24": {
@@ -141,6 +145,10 @@
     "tekton-kueue": {
       "upstream": "tektoncd/tekton-kueue",
       "branch": "release-v0.4.x"
+    },
+    "serve-tkn-cli": {
+      "upstream": "openshift-pipelines/serve-tkn-cli",
+      "branch": "release-v0.1.x"
     }
   }
 }

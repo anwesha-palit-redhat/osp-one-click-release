@@ -43,6 +43,9 @@ verify_4_1() {
   : >"${REPORT_BASE}/.state/stage-release-prerequisites.tsv"
   while IFS= read -r app; do
     [[ -n "${app}" ]] || continue
+    if [[ "${app}" != "${core_app}" && "${app}" != "${bundle_app}" ]]; then
+      ocr_index_app_selected "${app}" || continue
+    fi
     ((total += 1))
     # Prefer STAGE_CORE_SNAPSHOT from stage-vars.env for the core app so
     # stray snapshots that overwrite the per-app state file cannot break it.
@@ -359,6 +362,7 @@ verify_4_7() {
       local skip_checked=0 skip_stale=0
       apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
       while IFS= read -r app; do
+        ocr_index_app_selected "${app}" || continue
         snapshot=$(ocr_latest_snapshot "${app}")
         [[ -n "${snapshot}" ]] || continue
         ((skip_checked += 1))
@@ -447,6 +451,7 @@ verify_4_7() {
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
   : >"${REPORT_BASE}/.state/production-index-snapshots.tsv"
   while IFS= read -r app; do
+    ocr_index_app_selected "${app}" || continue
     # Index is rebuilt for production — always use latest to find the post-rebuild snapshot
     snapshot=$(ocr_latest_snapshot "${app}")
     [[ -n "${snapshot}" ]] || continue
@@ -477,6 +482,7 @@ verify_4_8() {
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
   releases=$(releases_json)
   while IFS= read -r app; do
+    ocr_index_app_selected "${app}" || continue
     # Use the production-pinned index snapshot (saved by verify_4_7)
     if [[ -f "${REPORT_BASE}/.state/prod-4.7-${app}-snapshot" ]]; then
       snapshot=$(<"${REPORT_BASE}/.state/prod-4.7-${app}-snapshot")

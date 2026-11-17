@@ -26,12 +26,6 @@ ensure_release_author() {
   fi
 }
 
-inject_release_author_label() {
-  local path=$1
-  [[ -n "${RELEASE_AUTHOR:-}" ]] || return 0
-  sed -i "/appstudio.openshift.io\/application:/a\\    release.appstudio.openshift.io/author: ${RELEASE_AUTHOR}" "${path}"
-}
-
 ocr_describe_action() {
   case "$1" in
     2.1) printf 'Ensure code freeze is not active before starting the build.\n' ;;
@@ -46,13 +40,13 @@ ocr_describe_action() {
     2.10) printf 'Run staging operator-update-images, merge its verified PR, and render the staging catalog.\n' ;;
     2.11) printf 'Trigger bundle and index rebuilds for stale FBC snapshots.\n' ;;
     2.12) printf 'Create the bundle stage Release CR after the core stage release succeeds.\n' ;;
-    2.13) printf 'Create index stage Release CRs after the bundle stage release succeeds.\n' ;;
+    2.13) printf 'Prompt for needed OCP versions, then create index stage Release CRs after the bundle stage release succeeds.\n' ;;
   esac
 }
 
 pr_ready() {
   local url=$1 data
-  data=$(gh pr view "${url}" --json mergeable,mergeStateStatus,statusCheckRollup)
+  data=$(gh pr view "${url}" --json mergeable,mergeStateStatus,statusCheckRollup) || return 1
   jq -e '.mergeable != "CONFLICTING" and .mergeStateStatus != "DIRTY" and
     ([.statusCheckRollup[]? | select((.status//"") != "COMPLETED")] | length) == 0 and
     ([.statusCheckRollup[]? | select((.conclusion//"") != "" and ((.conclusion | IN("SUCCESS","NEUTRAL","SKIPPED")) | not))] | length) == 0' \
@@ -64,7 +58,11 @@ process_pr_urls() {
   while IFS= read -r url; do
     [[ -n "${url}" ]] || continue
     local data mergeable merge_state
-    data=$(gh pr view "${url}" --json mergeable,mergeStateStatus,statusCheckRollup)
+    if ! data=$(gh pr view "${url}" --json mergeable,mergeStateStatus,statusCheckRollup); then
+      printf 'WARNING: could not inspect PR — skipping: %s\n' "${url}" >&2
+      ((failed += 1))
+      continue
+    fi
     mergeable=$(jq -r '.mergeable' <<<"${data}")
     merge_state=$(jq -r '.mergeStateStatus' <<<"${data}")
 
@@ -73,7 +71,7 @@ process_pr_urls() {
       ((failed += 1))
     elif [[ "${merge_state}" == "BEHIND" ]]; then
       printf 'BEHIND — rebasing: %s\n' "${url}" >&2
-      gh pr update-branch "${url}" --rebase
+      gh pr update-branch "${url}" --rebase || printf 'WARNING: rebase failed — skipping: %s\n' "${url}" >&2
       ((failed += 1))
     elif jq -e '[.statusCheckRollup[]? | select((.status//"") != "COMPLETED")] | length > 0' <<<"${data}" >/dev/null 2>&1; then
       printf 'CI PENDING — checks still running: %s\n' "${url}" >&2
@@ -82,12 +80,16 @@ process_pr_urls() {
       printf 'CI FAILING — requires manual investigation: %s\n' "${url}" >&2
       ((failed += 1))
     else
-      # Label-add is best-effort — don't fail if permissions are missing
       if ! gh pr edit "${url}" --add-label lgtm,approved,one-click-release 2>/dev/null; then
         printf 'WARNING: could not add labels (permissions?) — proceeding with merge: %s\n' "${url}" >&2
       fi
-      gh pr review --approve "${url}"
-      gh pr merge "${url}" -d -r --auto
+      if ! gh pr review --approve "${url}"; then
+        printf 'WARNING: could not approve PR — proceeding with merge: %s\n' "${url}" >&2
+      fi
+      if ! gh pr merge "${url}" -d -r --auto; then
+        printf 'WARNING: merge failed — skipping: %s\n' "${url}" >&2
+        ((failed += 1))
+      fi
     fi
   done
   ((failed == 0)) || return 2
@@ -241,7 +243,6 @@ create_stage_release() {
   fi
   path="${REPORT_BASE}/manifest/stage/release-${VERSION}-${kind}-stage.yaml"
   ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
-  inject_release_author_label "${path}"
   ocr_create_release_manifest "${path}" || return 2
   # Pin snapshot only after successful release creation to avoid stale snapshots on retry
   printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${app}-snapshot"
@@ -491,7 +492,6 @@ execute_2_12() {
 
 create_index_stage_release() {
   local app=$1 snapshot rp ocp path existing existing_name existing_status existing_reason
-  ensure_release_author || return 2
   if [[ -f "${REPORT_BASE}/.state/stage-${app}-snapshot" ]]; then
     snapshot=$(<"${REPORT_BASE}/.state/stage-${app}-snapshot")
   else
@@ -528,7 +528,6 @@ create_index_stage_release() {
   ocp=${ocp/-/.}
   path="${REPORT_BASE}/manifest/stage/release-${VERSION}-index-${ocp}-stage.yaml"
   ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
-  inject_release_author_label "${path}"
   ocr_create_release_manifest "${path}" || return 2
   printf '%s\n' "${snapshot}" >"${REPORT_BASE}/.state/stage-${app}-snapshot"
 }
@@ -547,6 +546,10 @@ execute_2_13() {
     printf 'No index applications found.\n' >&2
     return 2
   }
+  local selected
+  selected=$(ocr_prompt_index_ocp_selection "${index_apps[@]}") || return 2
+  mapfile -t index_apps <<<"${selected}"
+  ensure_release_author || return 2
   for app in "${index_apps[@]}"; do
     [[ -n "${app}" ]] || continue
     apps_list+=("${app}")

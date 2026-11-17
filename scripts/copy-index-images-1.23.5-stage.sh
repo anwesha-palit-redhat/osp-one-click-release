@@ -1,0 +1,62 @@
+#!/bin/bash
+# Copy 1.23.5 stage index images to quay.io/openshift-pipeline
+# Source: IIB images from index stage releases
+#
+# Generated: 2026-11-13_15-01-43_IST
+# Prerequisites: VPN connected, quay.io login active
+#
+# Stage releases used:
+#   openshift-pipelines-index-4-14-1-23-stage-rp-88cnt (openshift-pipelines-index-4-14-1-23-stage-rp)
+#   openshift-pipelines-index-4-16-1-23-stage-rp-b68xc (openshift-pipelines-index-4-16-1-23-stage-rp)
+#   openshift-pipelines-index-4-18-1-23-stage-rp-rf7lv (openshift-pipelines-index-4-18-1-23-stage-rp)
+#   openshift-pipelines-index-4-19-1-23-stage-rp-fg24b (openshift-pipelines-index-4-19-1-23-stage-rp)
+#   openshift-pipelines-index-4-20-1-23-stage-rp-m5lr8 (openshift-pipelines-index-4-20-1-23-stage-rp)
+#   openshift-pipelines-index-4-21-1-23-stage-rp-2j5vh (openshift-pipelines-index-4-21-1-23-stage-rp)
+#   openshift-pipelines-index-4-22-1-23-stage-rp-vqb4z (openshift-pipelines-index-4-22-1-23-stage-rp)
+
+set -euo pipefail
+
+echo "=== Logging into quay.io ==="
+source "$(dirname "$0")/../.env"
+echo "${QUAY_PASSWORD}" | skopeo login quay.io -u "${QUAY_USER}" --password-stdin
+
+echo "=== Running image copy script ==="
+echo "Copying 1.23.5 stage index images to quay.io..."
+
+# OCP 4.14
+skopeo copy --all \
+  docker://registry-proxy.engineering.redhat.com/rh-osbs/iib@sha256:3f739afb4819f222d8d5c56f79a3b5ae152f8fdc53f7b72e4b4944390a32c334 \
+  docker://quay.io/openshift-pipeline/pipelines-index-4.14:v1.23.5-stage \
+  --preserve-digests
+# OCP 4.16
+skopeo copy --all \
+  docker://registry-proxy.engineering.redhat.com/rh-osbs/iib@sha256:a817bd520054f4f29abc8b511665ff2a8fc2a6c6ee8d795f71c518b43fa72d87 \
+  docker://quay.io/openshift-pipeline/pipelines-index-4.16:v1.23.5-stage \
+  --preserve-digests
+# OCP 4.18
+skopeo copy --all \
+  docker://registry-proxy.engineering.redhat.com/rh-osbs/iib@sha256:c5ebf502d3feb575f3263fa9358544593785ee18fe62b2a1abb8543b6fb49f31 \
+  docker://quay.io/openshift-pipeline/pipelines-index-4.18:v1.23.5-stage \
+  --preserve-digests
+# OCP 4.19
+skopeo copy --all \
+  docker://registry-proxy.engineering.redhat.com/rh-osbs/iib@sha256:85c76d8c6ca17f93b1d9f58532d5ff0ce435eb5de7c38ecf8c936b3ae61ef969 \
+  docker://quay.io/openshift-pipeline/pipelines-index-4.19:v1.23.5-stage \
+  --preserve-digests
+# OCP 4.20
+skopeo copy --all \
+  docker://registry-proxy.engineering.redhat.com/rh-osbs/iib@sha256:742ccf1f4f35410e6b9351274a2e08dfe6a6023774f9c7841123eb0f505c029f \
+  docker://quay.io/openshift-pipeline/pipelines-index-4.20:v1.23.5-stage \
+  --preserve-digests
+# OCP 4.21
+skopeo copy --all \
+  docker://registry-proxy.engineering.redhat.com/rh-osbs/iib@sha256:0f1ca84325ca03fa4e8d96109ba6a236703f53207920ae9128df627d58943b8b \
+  docker://quay.io/openshift-pipeline/pipelines-index-4.21:v1.23.5-stage \
+  --preserve-digests
+# OCP 4.22
+skopeo copy --all \
+  docker://registry-proxy.engineering.redhat.com/rh-osbs/iib@sha256:8af4eb96235d8dacdaec7d84a655ae6daff5eaf54e2d6baa48f0f1065d98b437 \
+  docker://quay.io/openshift-pipeline/pipelines-index-4.22:v1.23.5-stage \
+  --preserve-digests
+
+echo "Done — all index images copied."

@@ -24,12 +24,6 @@ ensure_release_author() {
   fi
 }
 
-inject_release_author_label() {
-  local path=$1
-  [[ -n "${RELEASE_AUTHOR:-}" ]] || return 0
-  sed -i "/appstudio.openshift.io\/application:/a\\    release.appstudio.openshift.io/author: ${RELEASE_AUTHOR}" "${path}"
-}
-
 ocr_describe_action() {
   case "$1" in
     4.1) printf 'Stage releases are prerequisites; repair them in the build stage.\n' ;;
@@ -40,7 +34,7 @@ ocr_describe_action() {
     4.6) printf 'Create the bundle production Release CR.\n' ;;
     4.7) printf 'Wait for devel renders, dispatch the production catalog render, validate and merge its exact generated PR, then verify or trigger production index snapshots.\n' ;;
     4.8)
-      printf 'Create all index production Release CRs.\n'
+      printf 'Prompt for needed OCP versions, then create index production Release CRs.\n'
       printf '\nIndex snapshots to be released:\n'
       local _app _snap
       for _app in "${REPORT_BASE}/.state"/prod-4.7-openshift-pipelines-index-*-snapshot; do
@@ -157,7 +151,6 @@ create_prod_release() {
   fi
   path="${REPORT_BASE}/manifest/prod/release-${VERSION}-${kind}-prod.yaml"
   ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
-  inject_release_author_label "${path}"
   ocr_create_release_manifest "${path}" || return 2
 }
 
@@ -368,6 +361,7 @@ execute_4_7() {
       # Jump to the index snapshot check below
       apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
       while IFS= read -r app; do
+        ocr_index_app_selected "${app}" || continue
         snapshot=$(ocr_latest_snapshot "${app}")
         [[ -n "${snapshot}" ]] || { stale=true; continue; }
         ((found += 1))
@@ -426,6 +420,7 @@ execute_4_7() {
       local idx_app idx_snap idx_created
       apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
       while IFS= read -r idx_app; do
+        ocr_index_app_selected "${idx_app}" || continue
         idx_snap=$(ocr_latest_snapshot "${idx_app}")
         if [[ -n "${idx_snap}" ]]; then
           idx_created=$(ocr_oc_get snapshot "${idx_snap}" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null)
@@ -453,6 +448,7 @@ execute_4_7() {
       # Skip the PR validation and jump straight to index snapshot checks
       apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
       while IFS= read -r app; do
+        ocr_index_app_selected "${app}" || continue
         snapshot=$(ocr_latest_snapshot "${app}")
         [[ -n "${snapshot}" ]] || { stale=true; continue; }
         ((found += 1))
@@ -526,6 +522,7 @@ execute_4_7() {
   }
   apps=$(ocr_oc_get applications.appstudio.redhat.com -o json)
   while IFS= read -r app; do
+    ocr_index_app_selected "${app}" || continue
     snapshot=$(ocr_latest_snapshot "${app}")
     if [[ -z "${snapshot}" ]]; then
       stale=true
@@ -566,7 +563,6 @@ execute_4_7() {
 
 create_index_prod_release() {
   local app=$1 snapshot rp ocp path existing existing_name existing_status existing_reason
-  ensure_release_author || return 2
   if [[ -f "${REPORT_BASE}/.state/prod-4.7-${app}-snapshot" ]]; then
     snapshot=$(<"${REPORT_BASE}/.state/prod-4.7-${app}-snapshot")
   else
@@ -603,7 +599,6 @@ create_index_prod_release() {
   ocp=${ocp/-/.}
   path="${REPORT_BASE}/manifest/prod/release-${VERSION}-index-${ocp}-prod.yaml"
   ocr_write_release_manifest "${path}" "${app}" "${rp}" "${snapshot}"
-  inject_release_author_label "${path}"
   ocr_create_release_manifest "${path}" || return 2
 }
 
@@ -623,7 +618,7 @@ execute_4_8() {
     return 2
   }
   printf '\nIndex snapshots to be released:\n' >&2
-  local snap_display
+  local snap_display selected
   for app in "${index_apps[@]}"; do
     [[ -n "${app}" ]] || continue
     if [[ -f "${REPORT_BASE}/.state/prod-4.7-${app}-snapshot" ]]; then
@@ -634,6 +629,9 @@ execute_4_8() {
     printf '  %s  →  %s\n' "${app}" "${snap_display:-MISSING}" >&2
   done
   printf '\n' >&2
+  selected=$(ocr_prompt_index_ocp_selection "${index_apps[@]}") || return 2
+  mapfile -t index_apps <<<"${selected}"
+  ensure_release_author || return 2
   for app in "${index_apps[@]}"; do
     [[ -n "${app}" ]] || continue
     apps_list+=("${app}")

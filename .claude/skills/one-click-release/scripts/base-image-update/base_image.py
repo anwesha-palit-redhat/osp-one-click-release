@@ -115,12 +115,21 @@ def component_names(path: Path, minor: str) -> list[str]:
     return names
 
 
+def catalog_registry(registry: str) -> str:
+    # Catalog indexes authenticated registry.redhat.io images under
+    # registry.access.redhat.com (e.g. rhel9/httpd-24).
+    if registry == "registry.redhat.io":
+        return "registry.access.redhat.com"
+    return registry
+
+
 def catalog_images_url(image: str) -> tuple[str, str]:
     registry, repository = image.split("/", 1)
+    catalog_host = catalog_registry(registry)
     repository_path = "/".join(quote(part, safe="") for part in repository.split("/"))
     url = (
         f"{CATALOG_ROOT}/api/containers/v1/repositories/registry/"
-        f"{quote(registry, safe='')}/repository/{repository_path}/images"
+        f"{quote(catalog_host, safe='')}/repository/{repository_path}/images"
     )
     return url, repository
 
@@ -1018,6 +1027,9 @@ def self_check() -> None:
         pass
     else:
         raise AssertionError("empty catalog payload should fail")
+    url, repository = catalog_images_url("registry.redhat.io/rhel9/httpd-24")
+    assert repository == "rhel9/httpd-24", repository
+    assert "/registry/registry.access.redhat.com/repository/rhel9/httpd-24/images" in url, url
 
     old_go = sample_digest("1")
     new_go = sample_digest("2")

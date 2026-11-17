@@ -1,0 +1,5 @@
+VERSION=1.15.6
+STAGE=production-release
+BLOCKING_STEP=4.12
+BLOCKING_DETAILS=0/13\ repos\ tagged\ with\ v1.15.6
+REPORT_FILE=/Users/apalit/Work/osp-one-click-release/reports/1.15/1.15.6/release/report_2026-10-27_17-05-04_IST.md

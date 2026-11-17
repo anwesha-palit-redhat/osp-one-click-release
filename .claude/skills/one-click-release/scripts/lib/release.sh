@@ -8,6 +8,64 @@ ocr_latest_snapshot() {
     -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | awk '{print $NF}'
 }
 
+ocr_index_app_ocp() {
+  local app=$1 ocp
+  ocp=${app#openshift-pipelines-index-}
+  ocp=${ocp%-"${MM_DASHED}"}
+  printf '%s' "${ocp/-/.}"
+}
+
+ocr_index_ocp_state_file() {
+  printf '%s/.state/index-ocp-versions.tsv' "${REPORT_BASE}"
+}
+
+ocr_index_app_selected() {
+  local app=$1 file answer
+  file=$(ocr_index_ocp_state_file)
+  [[ -f "${file}" ]] || return 0
+  answer=$(awk -F'\t' -v app="${app}" '$3 == app { print $2; exit }' "${file}")
+  [[ -z "${answer}" || "${answer}" == y ]]
+}
+
+ocr_prompt_index_ocp_selection() {
+  local app ocp answer file
+  local -a selected=()
+  file=$(ocr_index_ocp_state_file)
+  mkdir -p "$(dirname "${file}")"
+  : >"${file}"
+  printf 'Select OCP versions for the index release (y/n):\n' >&2
+  for app in "$@"; do
+    [[ -n "${app}" ]] || continue
+    ocp=$(ocr_index_app_ocp "${app}")
+    if [[ "${OCR_RUN_THROUGH:-}" == true ]]; then
+      answer=y
+      printf '%s > y\n' "${ocp}" >&2
+    else
+      while true; do
+        printf '%s > ' "${ocp}" >&2
+        if ! IFS= read -r answer; then
+          [[ -n "${answer}" ]] || {
+            printf 'No OCP version selection provided.\n' >&2
+            return 2
+          }
+        fi
+        case "${answer}" in
+          y | Y | yes | YES | Yes) answer=y; break ;;
+          n | N | no | NO | No) answer=n; break ;;
+          *) printf 'Please type y or n.\n' >&2 ;;
+        esac
+      done
+    fi
+    printf '%s\t%s\t%s\n' "${ocp}" "${answer}" "${app}" >>"${file}"
+    [[ "${answer}" == y ]] && selected+=("${app}")
+  done
+  ((${#selected[@]} > 0)) || {
+    printf 'No OCP versions selected for the index release.\n' >&2
+    return 2
+  }
+  printf '%s\n' "${selected[@]}"
+}
+
 ocr_snapshot_component_image() {
   local snapshot=$1
   ocr_oc_get snapshot "${snapshot}" -o jsonpath='{.spec.components[0].containerImage}'
@@ -38,6 +96,9 @@ ocr_write_release_manifest() {
     printf 'metadata:\n'
     printf '  labels:\n'
     printf '    appstudio.openshift.io/application: %s\n' "${app}"
+    if [[ -n "${RELEASE_AUTHOR:-}" ]]; then
+      printf '    release.appstudio.openshift.io/author: %s\n' "${RELEASE_AUTHOR}"
+    fi
     printf '  generateName: %s-\n' "${release_plan}"
     printf '  namespace: %s\n' "${KONFLUX_NS}"
     printf 'spec:\n'

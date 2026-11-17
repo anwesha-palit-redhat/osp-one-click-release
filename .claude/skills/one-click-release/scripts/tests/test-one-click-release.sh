@@ -122,6 +122,12 @@ if grep -q '^  generateName: core-stage-rp-$' "${manifest}" && grep -q '^  names
 else
   fail 'release manifests retain generateName and the fixed Konflux namespace'
 fi
+RELEASE_AUTHOR=rh-ee-apalit ocr_write_release_manifest "${manifest}" openshift-pipelines-core-1-21 core-stage-rp core-snapshot
+if grep -q '^    release.appstudio.openshift.io/author: rh-ee-apalit$' "${manifest}"; then
+  pass 'release manifests include the author label without GNU sed'
+else
+  fail 'release manifests include the author label without GNU sed'
+fi
 if grep -ERn 'oc[[:space:]]+apply[[:space:]]+-f.*release-|ocr_oc_create.*apply' "${SCRIPTS_DIR}"/{build,production-release,lib} >/tmp/ocr-test.out; then
   fail 'Release CR execution never uses oc apply'
 else
@@ -303,6 +309,68 @@ if (
   wait_in_progress_runs render-olm-catalog.yaml
 ); then fail 'workflow-list API failure blocks duplicate dispatch'; else pass 'workflow-list API failure blocks duplicate dispatch'; fi
 unset OCR_TEST_GH_SCENARIO
+
+process_pr_continue_log="${tmp}/process-pr-continue.log"
+: >"${process_pr_continue_log}"
+process_pr_continue_rc=$(
+  source "${SCRIPTS_DIR}/build/execute.sh"
+  gh() {
+    printf '%s\n' "$*" >>"${process_pr_continue_log}"
+    case "$*" in
+      *'pr view'*)
+        printf '%s\n' '{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"}]}'
+        ;;
+      *'pr review'*'opc/pull/590'*)
+        printf 'failed to create review: GraphQL: Review Can not approve your own pull request\n' >&2
+        return 1
+        ;;
+      *'pr merge'*'p12n-tekton-caches/pull/526'*)
+        printf 'GraphQL: Pull Request is not mergeable\n' >&2
+        return 1
+        ;;
+      *) return 0 ;;
+    esac
+  }
+  run_rc_input $'https://github.com/openshift-pipelines/p12n-tekton-caches/pull/526\nhttps://github.com/openshift-pipelines/opc/pull/590\nhttps://github.com/openshift-pipelines/operator/pull/36953' process_pr_urls
+)
+assert_eq '2' "${process_pr_continue_rc}" 'build PR processing still reports remaining failures'
+if grep -q 'p12n-tekton-caches/pull/526' "${process_pr_continue_log}" && grep -q 'opc/pull/590' "${process_pr_continue_log}" && grep -q 'operator/pull/36953' "${process_pr_continue_log}"; then
+  pass 'build PR processing continues after a per-PR failure'
+else
+  fail 'build PR processing continues after a per-PR failure'
+fi
+if grep -q 'pr merge https://github.com/openshift-pipelines/opc/pull/590' "${process_pr_continue_log}" && grep -q 'pr merge https://github.com/openshift-pipelines/operator/pull/36953' "${process_pr_continue_log}"; then
+  pass 'build PR processing still merges remaining ready PRs after a failure'
+else
+  fail 'build PR processing still merges remaining ready PRs after a failure'
+fi
+
+assert_eq '4.14' "$(ocr_index_app_ocp openshift-pipelines-index-4-14-1-21)" 'index app name maps to OCP 4.14'
+assert_eq '5.0' "$(ocr_index_app_ocp openshift-pipelines-index-5-0-1-21)" 'index app name maps to OCP 5.0'
+index_ocp_selected=$(run_rc_input $'y\nn\ny' ocr_prompt_index_ocp_selection \
+  openshift-pipelines-index-4-14-1-21 \
+  openshift-pipelines-index-4-16-1-21 \
+  openshift-pipelines-index-5-0-1-21)
+assert_eq '0' "${index_ocp_selected}" 'OCP version prompt accepts mixed y/n answers'
+if grep -Fxq 'openshift-pipelines-index-4-14-1-21' /tmp/ocr-test.out &&
+  ! grep -Fxq 'openshift-pipelines-index-4-16-1-21' /tmp/ocr-test.out &&
+  grep -Fxq 'openshift-pipelines-index-5-0-1-21' /tmp/ocr-test.out; then
+  pass 'OCP version prompt returns only selected index apps'
+else
+  fail 'OCP version prompt returns only selected index apps'
+fi
+if ocr_index_app_selected openshift-pipelines-index-4-14-1-21 &&
+  ! ocr_index_app_selected openshift-pipelines-index-4-16-1-21 &&
+  ocr_index_app_selected openshift-pipelines-index-5-0-1-21; then
+  pass 'OCP version selection is honored by later index steps'
+else
+  fail 'OCP version selection is honored by later index steps'
+fi
+assert_eq '2' "$(run_rc_input $'n\nn\nn' ocr_prompt_index_ocp_selection \
+  openshift-pipelines-index-4-14-1-21 \
+  openshift-pipelines-index-4-16-1-21 \
+  openshift-pipelines-index-5-0-1-21)" 'OCP version prompt refuses selecting no versions'
+rm -f "$(ocr_index_ocp_state_file)"
 
 ocr_record_workflow_run production-proof render-olm-catalog.yaml production "${RELEASE_BRANCH}" 12345 2026-09-28T12:00:00Z
 ocr_load_workflow_run production-proof
