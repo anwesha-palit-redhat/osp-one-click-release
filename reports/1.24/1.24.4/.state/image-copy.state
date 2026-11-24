@@ -1,0 +1,5 @@
+VERSION=1.24.4
+STAGE=image-copy
+BLOCKING_STEP=3.2
+BLOCKING_DETAILS=0/8\ quay\ index\ images\ match\ IIB\ digests
+REPORT_FILE=/Users/apalit/Work/osp-one-click-release/reports/1.24/1.24.4/image-copy/report_2026-11-24_17-42-14_IST.md

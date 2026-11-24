@@ -1,5 +1,5 @@
 VERSION=1.24.4
 STAGE=config
-BLOCKING_STEP=1.5
-BLOCKING_DETAILS=unable\ to\ query\ konflux-release-data
-REPORT_FILE=/Users/apalit/Work/osp-one-click-release/reports/1.24/1.24.4/config/report_2026-11-13_08-53-53_IST.md
+BLOCKING_STEP=''
+BLOCKING_DETAILS=''
+REPORT_FILE=/Users/apalit/Work/osp-one-click-release/reports/1.24/1.24.4/config/report_2026-11-24_17-42-13_IST.md

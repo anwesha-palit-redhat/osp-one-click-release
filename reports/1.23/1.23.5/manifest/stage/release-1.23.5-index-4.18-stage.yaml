@@ -8,4 +8,4 @@ metadata:
   namespace: tekton-ecosystem-tenant
 spec:
   releasePlan: openshift-pipelines-index-4-18-1-23-stage-rp
-  snapshot: openshift-pipelines-index-4-18-1-23-20261113-074052-000
+  snapshot: openshift-pipelines-index-4-18-1-23-20261124-112154-000
